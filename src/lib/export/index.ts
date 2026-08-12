@@ -1,8 +1,12 @@
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile } from '@ffmpeg/util';
-import ffmpegCoreURL from '@ffmpeg/core?url';
-import ffmpegCoreWasmURL from '@ffmpeg/core/wasm?url';
 import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
+
+// load ffmpeg-core from CDN to avoid bundling the 31 MB wasm
+const FFMPEG_CORE_VERSION = '0.12.10';
+const FFMPEG_CDN_BASE = `https://cdn.jsdelivr.net/npm/@ffmpeg/core@${FFMPEG_CORE_VERSION}/dist/umd`;
+const ffmpegCoreURL = `${FFMPEG_CDN_BASE}/ffmpeg-core.js`;
+const ffmpegCoreWasmURL = `${FFMPEG_CDN_BASE}/ffmpeg-core.wasm`;
 import type { Track, Clip } from '$lib/editor/timeline';
 import {
 	FRAME_RATE,
