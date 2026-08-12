@@ -1,0 +1,20 @@
+# Viko
+
+> Viko is a free, open source, browser-based video editor. It runs entirely in the browser with no accounts, no uploads and no cloud rendering: users import media from their device, edit on a frame-precise multi-track timeline with keyframes, color grading, captions and effects, then export MP4 offline.
+
+Important notes:
+- Viko is built with SvelteKit and runs completely client-side in the browser. Projects, media and version snapshots are stored locally in IndexedDB and localStorage.
+- The editor is free and open source under the Apache License 2.0. Source code lives at https://github.com/pimatis/viko.
+- Viko is a desktop-first tool: timeline editing, keyframes, grading and export are tuned for a large display, mouse and keyboard.
+- No accounts, no tracking, no cloud uploads. Media never leaves the user's machine.
+
+## Pages
+
+- [Viko homepage](https://github.com/pimatis/viko): Overview of the product and features, workflow, FAQ, privacy and terms.
+- [Privacy policy](https://github.com/pimatis/viko): What data Viko stores on the device (IndexedDB, localStorage) and what never leaves it.
+- [Terms of service](https://github.com/pimatis/viko): Apache 2.0 license terms and contribution guidelines.
+
+## GitHub
+
+- [Viko repository](https://github.com/pimatis/viko): Source code, issues, feature requests and pull requests.
+- [Pimatis organization](https://github.com/pimatis): The organization behind Viko.
