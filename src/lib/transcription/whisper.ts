@@ -49,8 +49,8 @@ async function createWhisperCall(onProgress?: LoadProgressHandler): Promise<Whis
 	if (typeof navigator !== 'undefined' && 'gpu' in navigator) {
 		try {
 			return await load('webgpu', WHISPER_QUANTIZED_DTYPE);
-		} catch (error) {
-			console.warn('[captions] WebGPU transcription unavailable, falling back to WASM:', error);
+		} catch {
+			// fall back to the WASM backend
 		}
 	}
 	return load('wasm', WHISPER_CPU_DTYPE);

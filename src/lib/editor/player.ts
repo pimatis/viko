@@ -5,14 +5,15 @@ import { getClipPairTransitionProgress, type TransitionRole } from '$lib/effects
 
 export type PlayerAspectRatio = { width: number; height: number };
 
-export type PlayerAspectRatioPresetId = '16:9' | '9:16' | '1:1' | '4:3';
+export type PlayerAspectRatioPresetId = '16:9' | '9:16' | '1:1' | '4:3' | '4:5';
 export type PlayerAspectRatioMode = PlayerAspectRatioPresetId | 'auto';
 
 export const PLAYER_ASPECT_RATIOS: Record<PlayerAspectRatioPresetId, PlayerAspectRatio> = {
 	'16:9': { width: 16, height: 9 },
 	'9:16': { width: 9, height: 16 },
 	'1:1': { width: 1, height: 1 },
-	'4:3': { width: 4, height: 3 }
+	'4:3': { width: 4, height: 3 },
+	'4:5': { width: 4, height: 5 }
 };
 
 export const PLAYER_ASPECT_RATIO_PRESETS = Object.keys(
@@ -20,6 +21,66 @@ export const PLAYER_ASPECT_RATIO_PRESETS = Object.keys(
 ) as PlayerAspectRatioPresetId[];
 
 export const DEFAULT_PLAYER_ASPECT_RATIO: PlayerAspectRatio = { width: 16, height: 9 };
+
+export type SocialTemplateId = 'reels' | 'portrait' | 'square' | 'landscape';
+
+export type SocialTemplate = {
+	id: SocialTemplateId;
+	name: string;
+	platform: string;
+	ratioLabel: PlayerAspectRatioPresetId;
+	resolutionLabel: string;
+	ratio: PlayerAspectRatio;
+	description: string;
+};
+
+export const SOCIAL_TEMPLATES: SocialTemplate[] = [
+	{
+		id: 'reels',
+		name: 'Reels / Shorts',
+		platform: 'Instagram · TikTok · YouTube',
+		ratioLabel: '9:16',
+		resolutionLabel: '1080×1920',
+		ratio: { width: 9, height: 16 },
+		description: 'Vertical video for Instagram Reels, TikTok and YouTube Shorts.'
+	},
+	{
+		id: 'portrait',
+		name: 'Portrait',
+		platform: 'Instagram · Facebook feed',
+		ratioLabel: '4:5',
+		resolutionLabel: '1080×1350',
+		ratio: { width: 4, height: 5 },
+		description: 'Tall feed post that fills most of a mobile screen.'
+	},
+	{
+		id: 'square',
+		name: 'Square',
+		platform: 'Instagram · Facebook feed',
+		ratioLabel: '1:1',
+		resolutionLabel: '1080×1080',
+		ratio: { width: 1, height: 1 },
+		description: 'Classic square post for feeds and carousels.'
+	},
+	{
+		id: 'landscape',
+		name: 'Landscape',
+		platform: 'YouTube · Desktop',
+		ratioLabel: '16:9',
+		resolutionLabel: '1920×1080',
+		ratio: { width: 16, height: 9 },
+		description: 'Widescreen format for YouTube and desktop playback.'
+	}
+];
+
+/** fit the template ratio inside a square thumbnail box, in px */
+export function getTemplatePreviewSize(template: SocialTemplate, maxSide = 30): { width: number; height: number } {
+	const ratio = template.ratio.width / template.ratio.height;
+	if (ratio >= 1) {
+		return { width: maxSide, height: Math.max(2, Math.round(maxSide / ratio)) };
+	}
+	return { width: Math.max(2, Math.round(maxSide * ratio)), height: maxSide };
+}
 
 export function detectPlayerAspectRatio(width: number, height: number): PlayerAspectRatio | null {
 	if (!Number.isFinite(width) || !Number.isFinite(height)) return null;

@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { Button } from '$lib/components/ui/button';
+	import { Badge } from '$lib/components/ui/badge';
 	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
 	import * as Tooltip from '$lib/components/ui/tooltip';
 	import * as Popover from '$lib/components/ui/popover';
@@ -277,14 +278,10 @@
 	>
 		<!-- left: brand + sidebar toggle + menus -->
 		<div class="flex min-w-0 items-center gap-1.5">
-			<a href="/" class="flex items-center gap-0.5 pr-1 text-foreground">
-				<img
-					src="/assets/logos/logo.png"
-					alt="Viko"
-					class="h-7 w-auto shrink-0"
-					draggable="false"
-				/>
-				<span class="text-sm font-bold tracking-tight">Viko</span>
+			<a href="/" class="flex shrink-0 items-center gap-2 text-foreground">
+				<img src="/assets/logos/logo.png" alt="Viko" class="h-7 w-auto shrink-0" draggable="false" />
+				<span class="text-base font-bold tracking-tight">Viko</span>
+				<Badge class="ml-1.5 h-[18px] rounded-full px-1.5 text-[10px] font-semibold tracking-wider">BETA</Badge>
 			</a>
 
 			<div class="h-4 w-px shrink-0 bg-border"></div>

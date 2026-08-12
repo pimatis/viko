@@ -229,9 +229,6 @@ async function transcodeToMp4(
 
 	try {
 		await ffmpeg.exec(args);
-	} catch (error) {
-		console.error('[export] ffmpeg exec failed:', error);
-		throw error;
 	} finally {
 		ffmpeg.off('log', progressListener.handler);
 	}
@@ -283,9 +280,6 @@ async function addAudioWithFfmpeg(
 		await ffmpeg.deleteFile('audio.wav');
 		await ffmpeg.deleteFile('output.mp4');
 		return new Blob([toBlobPart(data)], { type: 'video/mp4' });
-	} catch (error) {
-		console.error('[export] ffmpeg audio mux failed:', error);
-		throw error;
 	} finally {
 		ffmpeg.off('log', progressListener.handler);
 	}
@@ -1025,12 +1019,7 @@ export async function exportVideo(options: ExportOptions): Promise<Blob | null> 
 	const clips = collectVisualClips(tracks, mediaAssets);
 	const audioClips = collectAudioClips(tracks, mediaAssets);
 
-	try {
-		await waitForMediaReady(clips);
-	} catch (error) {
-		console.error('[export] media ready failed:', error);
-		throw error;
-	}
+	await waitForMediaReady(clips);
 
 	let mixedBuffer: AudioBuffer | null = null;
 
@@ -1051,8 +1040,8 @@ export async function exportVideo(options: ExportOptions): Promise<Blob | null> 
 				exportStart,
 				exportDuration
 			);
-		} catch (error) {
-			console.warn('[export] audio mixing failed, falling back to video-only:', error);
+		} catch {
+			// fall back to video-only export
 		}
 	}
 
@@ -1077,8 +1066,8 @@ export async function exportVideo(options: ExportOptions): Promise<Blob | null> 
 					mixedBuffer,
 					onProgress
 				);
-			} catch (error) {
-				console.warn('[export] WebCodecs pipeline failed, falling back to MediaRecorder:', error);
+			} catch {
+				// fall back to MediaRecorder
 			}
 		}
 
@@ -1115,9 +1104,6 @@ export async function exportVideo(options: ExportOptions): Promise<Blob | null> 
 		});
 
 		return finalBlob;
-	} catch (error) {
-		console.error('[export] exportVideo failed:', error);
-		throw error;
 	} finally {
 		cleanupClips(clips);
 	}

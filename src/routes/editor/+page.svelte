@@ -8,7 +8,9 @@
 	import Timeline from '../../components/editor/Timeline.svelte';
 	import Toolbar from '../../components/editor/Toolbar.svelte';
 	import { sound } from '$lib/sound';
+	import { useShortcuts, formatShortcut, type ShortcutBinding } from '$lib/shortcuts';
 	import { Button } from '$lib/components/ui/button';
+	import * as Command from '$lib/components/ui/command';
 	import * as Dialog from '$lib/components/ui/dialog';
 	import { Progress } from '$lib/components/ui/progress';
 	import { Input } from '$lib/components/ui/input';
@@ -48,7 +50,62 @@
 	} from '$lib/editor/captions';
 	import '$lib/transcription';
 	import type { EditorTool } from '$lib/editor/toolbar';
-	import { History, RotateCcw, Layers, Film, MapPin, Search, Clock } from '@lucide/svelte';
+	import { clampTimelineZoom, TIMELINE_ZOOM_STEP } from '$lib/editor/toolbar';
+	import {
+		History,
+		RotateCcw,
+		Layers,
+		Film,
+		MapPin,
+		Search,
+		Clock,
+		Plus,
+		FolderOpen,
+		Save,
+		Download,
+		Undo2,
+		Redo2,
+		PanelLeft,
+		ZoomIn,
+		ZoomOut,
+		Maximize2,
+		MousePointer2,
+		Scissors,
+		Hand,
+		Type,
+		Magnet,
+		Workflow,
+		Captions,
+		AudioLines,
+		// effect preset icons
+		Vibrate,
+		Zap,
+		Droplet,
+		SunMedium,
+		Clapperboard,
+		TimerReset,
+		MoveRight,
+		Scan,
+		Square,
+		SkipForward,
+		Contrast,
+		ThermometerSun,
+		ThermometerSnowflake,
+		Focus,
+		Eraser,
+		Aperture,
+		// transport icons
+		ArrowRightToLine,
+		ArrowLeftToLine,
+		X,
+		// sticker icons
+		Star,
+		Heart,
+		Sparkles,
+		ArrowRight,
+		Check,
+		TriangleAlert
+	} from '@lucide/svelte';
 	import {
 		clampBezierControlPoints,
 		clampKeyframeValue,
@@ -99,6 +156,10 @@
 		type ExportQuality,
 		type ExportProgress
 	} from '$lib/export';
+	import {
+		PLAYER_ASPECT_RATIO_PRESETS,
+		type PlayerAspectRatioMode
+	} from '$lib/editor/player';
 
 	let projectName = $state('Untitled Project');
 	let zoom = $state(100);
@@ -133,6 +194,7 @@
 	let entitySequence = 0;
 	let exportQuality = $state<ExportQuality>(DEFAULT_EXPORT_QUALITY);
 	let playerAspectRatio = $state<{ width: number; height: number }>({ width: 16, height: 9 });
+	let aspectRatioMode = $state<PlayerAspectRatioMode>('auto');
 	let isExporting = $state(false);
 	let exportProgress = $state<ExportProgress | null>(null);
 	let autoSaveBlocked = $state(false);
@@ -149,6 +211,7 @@
 	let transcribeFileName = $state<string | null>(null);
 	let projectLoadSequence = 0;
 	let mediaRestorePromise: Promise<void> | null = null;
+	let commandPaletteOpen = $state(false);
 
 	const sortedVersions = $derived([...versions].sort((a, b) => b.createdAt - a.createdAt));
 	const exportResolution = $derived(getExportResolution(playerAspectRatio, exportQuality));
@@ -244,6 +307,335 @@
 		...STICKER_PRESETS,
 		...EFFECT_PRESETS
 	];
+
+	type PaletteCommand = {
+		id: string;
+		label: string;
+		keywords?: string;
+		group: string;
+		hint?: string;
+		icon?: typeof History;
+		disabled?: () => boolean;
+		run: () => void;
+	};
+
+	const paletteToolOptions: { id: EditorTool; label: string; icon: typeof History }[] = [
+		{ id: 'select', label: 'Selection tool', icon: MousePointer2 },
+		{ id: 'razor', label: 'Razor tool', icon: Scissors },
+		{ id: 'hand', label: 'Hand tool', icon: Hand },
+		{ id: 'text', label: 'Text tool', icon: Type }
+	];
+
+	const stickerIconBySymbol: Record<string, typeof History> = {
+		'★': Star,
+		'♥': Heart,
+		'✦': Sparkles,
+		'➜': ArrowRight,
+		'✓': Check,
+		'!': TriangleAlert
+	};
+
+	const effectIconByPresetId: Record<string, typeof History> = {
+		'effect-shake': Vibrate,
+		'effect-glitch': Zap,
+		'effect-zoom-pulse': Focus,
+		'effect-soft-blur': Droplet,
+		'effect-flicker': SunMedium,
+		'effect-drift': Clapperboard,
+		'transition-fade': TimerReset,
+		'transition-dissolve': Sparkles,
+		'transition-slide': MoveRight,
+		'transition-zoom': Scan,
+		'clip-transition-cross-dissolve': Square,
+		'clip-transition-wipe': Eraser,
+		'clip-transition-push': SkipForward,
+		'filter-vintage': Film,
+		'filter-monochrome': Contrast,
+		'filter-warm': ThermometerSun,
+		'filter-cool': ThermometerSnowflake,
+		'filter-high-contrast': Aperture
+	};
+
+	const paletteCommands: PaletteCommand[] = [
+		// file
+		{
+			id: 'palette-new-project',
+			label: 'New Project',
+			keywords: 'create clear reset',
+			group: 'File',
+			icon: Plus,
+			run: () => {
+				newProjectDialogOpen = true;
+			}
+		},
+		{
+			id: 'palette-open-project',
+			label: 'Open Project',
+			keywords: 'import load',
+			group: 'File',
+			icon: FolderOpen,
+			run: () => openProjectInput?.click()
+		},
+		{
+			id: 'palette-save',
+			label: 'Save',
+			keywords: 'store persist',
+			group: 'File',
+			hint: formatShortcut({ key: 's', ctrlOrMeta: true }),
+			icon: Save,
+			disabled: () => isSaved || isSaving,
+			run: () => void saveProject()
+		},
+		{
+			id: 'palette-save-as',
+			label: 'Save As',
+			keywords: 'export project file download',
+			group: 'File',
+			hint: formatShortcut({ key: 's', ctrlOrMeta: true, shift: true }),
+			icon: Download,
+			run: () => downloadProject()
+		},
+		{
+			id: 'palette-export',
+			label: 'Export Video',
+			keywords: 'render mp4 movie',
+			group: 'File',
+			hint: formatShortcut({ key: 'e', ctrlOrMeta: true }),
+			icon: Download,
+			disabled: () => !isSaved || isExporting,
+			run: () => void handleExportVideo()
+		},
+		{
+			id: 'palette-version-history',
+			label: 'Version History',
+			keywords: 'restore snapshot versions',
+			group: 'File',
+			icon: History,
+			run: () => {
+				versionSearchQuery = '';
+				historyDialogOpen = true;
+				void loadVersionHistory();
+			}
+		},
+		// edit
+		{
+			id: 'palette-undo',
+			label: 'Undo',
+			keywords: 'revert back',
+			group: 'Edit',
+			hint: formatShortcut({ key: 'z', ctrlOrMeta: true }),
+			icon: Undo2,
+			disabled: () => !canUndo,
+			run: () => requestTimelineCommand('undo')
+		},
+		{
+			id: 'palette-redo',
+			label: 'Redo',
+			keywords: 'forward repeat',
+			group: 'Edit',
+			hint: formatShortcut({ key: 'z', ctrlOrMeta: true, shift: true }),
+			icon: Redo2,
+			disabled: () => !canRedo,
+			run: () => requestTimelineCommand('redo')
+		},
+		// view
+		{
+			id: 'palette-toggle-sidebar',
+			label: 'Toggle Sidebar',
+			keywords: 'panel show hide media',
+			group: 'View',
+			hint: formatShortcut({ key: 'b', ctrlOrMeta: true }),
+			icon: PanelLeft,
+			run: () => toggleSidebar()
+		},
+		{
+			id: 'palette-zoom-in',
+			label: 'Zoom In',
+			keywords: 'timeline magnify',
+			group: 'View',
+			hint: formatShortcut({ key: '+', ctrlOrMeta: true }),
+			icon: ZoomIn,
+			run: () => {
+				zoom = clampTimelineZoom(zoom + TIMELINE_ZOOM_STEP);
+			}
+		},
+		{
+			id: 'palette-zoom-out',
+			label: 'Zoom Out',
+			keywords: 'timeline shrink',
+			group: 'View',
+			hint: formatShortcut({ key: '-', ctrlOrMeta: true }),
+			icon: ZoomOut,
+			run: () => {
+				zoom = clampTimelineZoom(zoom - TIMELINE_ZOOM_STEP);
+			}
+		},
+		{
+			id: 'palette-zoom-reset',
+			label: 'Fit to Screen',
+			keywords: 'zoom reset 100 percent',
+			group: 'View',
+			hint: formatShortcut({ key: '0', ctrlOrMeta: true }),
+			icon: Maximize2,
+			run: () => {
+				zoom = 100;
+			}
+		},
+		// transport
+		{
+			id: 'palette-set-in',
+			label: 'Set In Point',
+			keywords: 'mark range start',
+			group: 'Transport',
+			hint: 'I',
+			icon: ArrowRightToLine,
+			run: () => handleSetInPoint()
+		},
+		{
+			id: 'palette-set-out',
+			label: 'Set Out Point',
+			keywords: 'mark range end',
+			group: 'Transport',
+			hint: 'O',
+			icon: ArrowLeftToLine,
+			run: () => handleSetOutPoint()
+		},
+		{
+			id: 'palette-clear-in-out',
+			label: 'Clear In/Out Points',
+			keywords: 'remove range marks',
+			group: 'Transport',
+			hint: formatShortcut({ key: 'i', ctrlOrMeta: true, shift: true }),
+			icon: X,
+			run: () => handleClearInOutPoints()
+		},
+		// tools
+		...paletteToolOptions.map((tool) => ({
+			id: `palette-tool-${tool.id}`,
+			label: tool.label,
+			keywords: 'tool',
+			group: 'Tools',
+			hint: tool.id === 'select' ? 'V' : tool.id === 'razor' ? 'B' : tool.id === 'hand' ? 'H' : 'T',
+			icon: tool.icon,
+			run: () => {
+				activeTool = tool.id;
+			}
+		})),
+		{
+			id: 'palette-toggle-snapping',
+			label: 'Toggle Snapping',
+			keywords: 'magnet align snap',
+			group: 'Tools',
+			hint: 'S',
+			icon: Magnet,
+			run: () => {
+				snappingEnabled = !snappingEnabled;
+			}
+		},
+		{
+			id: 'palette-toggle-ripple',
+			label: 'Toggle Ripple Mode',
+			keywords: 'delete ripple edit',
+			group: 'Tools',
+			hint: 'R',
+			icon: Workflow,
+			run: () => {
+				handleRippleModeToggle(!rippleMode);
+			}
+		},
+		// insert (text + stickers)
+		...TEXT_PRESETS.map((preset) => ({
+			id: `palette-insert-${preset.id}`,
+			label: `Add ${preset.name} Text`,
+			keywords: `text title insert ${preset.category}`,
+			group: 'Insert',
+			icon: Type,
+			run: () => applyResource(preset)
+		})),
+		...STICKER_PRESETS.map((preset) => ({
+			id: `palette-insert-${preset.id}`,
+			label: `Add ${preset.name} Sticker`,
+			keywords: `sticker symbol insert ${preset.category}`,
+			group: 'Insert',
+			icon: preset.sticker ? (stickerIconBySymbol[preset.sticker] ?? Star) : Star,
+			run: () => applyResource(preset)
+		})),
+		// effects
+		...EFFECT_PRESETS.map((preset) => ({
+			id: `palette-effect-${preset.id}`,
+			label: `Apply ${preset.name}`,
+			keywords: `${preset.kind} effect filter transition ${preset.category}`,
+			group: 'Effects',
+			icon: effectIconByPresetId[preset.id] ?? Sparkles,
+			run: () => applyResource(preset)
+		})),
+		// captions
+		{
+			id: 'palette-generate-captions',
+			label: 'Generate Captions',
+			keywords: 'subtitle captions transcript',
+			group: 'Captions',
+			icon: Captions,
+			run: () => {
+				handleGenerateCaptions({
+					transcript: '',
+					presetId: CAPTION_PRESETS[0]?.id ?? ''
+				});
+			}
+		},
+		{
+			id: 'palette-transcribe-media',
+			label: 'Transcribe Media',
+			keywords: 'whisper speech to text subtitles auto captions',
+			group: 'Captions',
+			icon: AudioLines,
+			disabled: () => isTranscribing,
+			run: () => {
+				void handleTranscribeMedia(CAPTION_PRESETS[0]?.id ?? '');
+			}
+		}
+	];
+
+	const paletteVersionCommands = $derived<PaletteCommand[]>(
+		sortedVersions.slice(0, 5).map((version) => ({
+			id: `palette-version-${version.id}`,
+			label: version.document.name,
+			keywords: 'restore snapshot version',
+			group: 'Versions',
+			hint: formatRelativeTime(version.createdAt),
+			run: () => void restoreVersion(version)
+		}))
+	);
+
+	const paletteGroups = $derived.by(() => {
+		const all = [...paletteCommands, ...paletteVersionCommands];
+		const order: string[] = [];
+		for (const cmd of all) {
+			if (!order.includes(cmd.group)) order.push(cmd.group);
+		}
+		return order.map((group) => ({
+			group,
+			items: all.filter((cmd) => cmd.group === group)
+		}));
+	});
+
+	function runPaletteCommand(cmd: PaletteCommand) {
+		sound.select();
+		cmd.run();
+		commandPaletteOpen = false;
+	}
+
+	const paletteShortcut: ShortcutBinding = {
+		key: 'k',
+		ctrlOrMeta: true,
+		description: 'Command Palette',
+		ignoreWhenTyping: true,
+		onKeyDown: () => {
+			commandPaletteOpen = true;
+		}
+	};
+
+	const paletteBindings: ShortcutBinding[] = [paletteShortcut];
 	const allowedFonts = new Set(TEXT_PRESETS.map((preset) => preset.textStyle.fontFamily));
 	const allowedStickers = new Set(STICKER_PRESETS.map((preset) => preset.sticker));
 	const timelineContentEnd = $derived(
@@ -518,7 +910,6 @@
 			insertCaptionSegments(offsetSegments, preset);
 			sound.complete();
 		} catch (error) {
-			console.error('[captions] transcription failed:', error);
 			projectNotice = error instanceof Error ? error.message : 'Transcription failed';
 			sound.error();
 		} finally {
@@ -611,6 +1002,18 @@
 
 	function isRecord(value: unknown): value is Record<string, unknown> {
 		return typeof value === 'object' && value !== null && !Array.isArray(value);
+	}
+
+	function isValidAspectRatio(value: unknown): value is { width: number; height: number } {
+		return (
+			isRecord(value) &&
+			typeof value.width === 'number' &&
+			Number.isFinite(value.width) &&
+			value.width > 0 &&
+			typeof value.height === 'number' &&
+			Number.isFinite(value.height) &&
+			value.height > 0
+		);
 	}
 
 	function sanitizeWheel(value: unknown): ColorWheel {
@@ -1010,7 +1413,15 @@
 					}
 				];
 			}),
-			updatedAt: typeof value.updatedAt === 'number' ? value.updatedAt : Date.now()
+			aspectRatio: isValidAspectRatio(value.aspectRatio)
+				? { width: value.aspectRatio.width, height: value.aspectRatio.height }
+				: { width: 16, height: 9 },
+			aspectRatioMode:
+				typeof value.aspectRatioMode === 'string' &&
+				(value.aspectRatioMode === 'auto' ||
+					(PLAYER_ASPECT_RATIO_PRESETS as readonly string[]).includes(value.aspectRatioMode))
+					? (value.aspectRatioMode as PlayerAspectRatioMode)
+					: 'auto',			updatedAt: typeof value.updatedAt === 'number' ? value.updatedAt : Date.now()
 		};
 	}
 
@@ -1022,6 +1433,8 @@
 			tracks,
 			mediaAssets,
 			markers,
+			aspectRatio: { width: playerAspectRatio.width, height: playerAspectRatio.height },
+			aspectRatioMode,
 			updatedAt: Date.now()
 		};
 	}
@@ -1073,7 +1486,6 @@
 				}
 			});
 			if (!blob) {
-				console.error('[export] exportVideo returned null blob');
 				projectNotice = 'Export produced no output';
 				return;
 			}
@@ -1086,7 +1498,6 @@
 			projectNotice = `Exported as ${exportQuality.label} (${exportResolution.width}x${exportResolution.height})`;
 			sound.complete();
 		} catch (error) {
-			console.error('[export] handleExportVideo failed:', error);
 			projectNotice = error instanceof Error ? error.message : 'Export failed';
 			sound.error();
 		} finally {
@@ -1158,7 +1569,10 @@
 		currentTime = 0;
 		isPlaying = false;
 		selectedClipId = null;
-		playerAspectRatio = { width: 16, height: 9 };
+		playerAspectRatio = isValidAspectRatio(document.aspectRatio)
+			? { width: document.aspectRatio.width, height: document.aspectRatio.height }
+			: { width: 16, height: 9 };
+		aspectRatioMode = document.aspectRatioMode ?? 'auto';
 		historyEpoch += 1;
 		isSaved = true;
 	}
@@ -1212,6 +1626,7 @@
 		isPlaying = false;
 		selectedClipId = null;
 		playerAspectRatio = { width: 16, height: 9 };
+		aspectRatioMode = 'auto';
 		historyEpoch += 1;
 		isSaved = true;
 		autoSaveEnabled = false;
@@ -1427,7 +1842,10 @@
 	});
 </script>
 
-<div class="flex h-screen w-screen flex-col overflow-hidden bg-background">
+<div
+	class="flex h-screen w-screen flex-col overflow-hidden bg-background"
+	use:useShortcuts={paletteBindings}
+>
 	<input
 		bind:this={openProjectInput}
 		type="file"
@@ -1505,6 +1923,11 @@
 				bind:isPlaying
 				bind:selectedClipId
 				bind:aspectRatio={playerAspectRatio}
+				bind:aspectRatioMode
+				onAspectSettingsChange={() => {
+					isSaved = false;
+					autoSaveBlocked = false;
+				}}
 				duration={timelineContentEnd}
 				{tracks}
 				{mediaAssets}
@@ -1666,14 +2089,16 @@
 			</Dialog.Header>
 
 			<!-- search bar -->
-			<div class="relative mb-3 border-b border-border pb-3">
-				<Search class="absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
-				<Input
-					bind:value={versionSearchQuery}
-					type="search"
-					placeholder="Search versions by name..."
-					class="h-8 pl-8 text-xs"
-				/>
+			<div class="mb-3 border-b border-border pb-3">
+				<div class="relative">
+					<Search class="absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+					<Input
+						bind:value={versionSearchQuery}
+						type="search"
+						placeholder="Search versions by name..."
+						class="h-8 pl-8 text-xs"
+					/>
+				</div>
 			</div>
 
 			<!-- version list -->
@@ -1780,6 +2205,41 @@
 			</div>
 		</Dialog.Content>
 	</Dialog.Root>
+
+	<Command.Dialog
+		bind:open={commandPaletteOpen}
+		title="Command Palette"
+		description="Search for a command to run..."
+		onOpenChange={(open) => {
+			commandPaletteOpen = open;
+			if (open) void loadVersionHistory();
+		}}
+	>
+		<Command.Input placeholder="Type a command or search..." />
+		<Command.List>
+			<Command.Empty>No results found.</Command.Empty>
+			{#each paletteGroups as group (group.group)}
+				<Command.Group heading={group.group}>
+					{#each group.items as cmd (cmd.id)}
+						<Command.Item
+							value={cmd.label}
+							keywords={cmd.keywords ? [cmd.keywords] : undefined}
+							disabled={cmd.disabled?.()}
+							onSelect={() => runPaletteCommand(cmd)}
+						>
+							{#if cmd.icon}
+								<cmd.icon class="size-4" />
+							{/if}
+							<span>{cmd.label}</span>
+							{#if cmd.hint}
+								<Command.Shortcut>{cmd.hint}</Command.Shortcut>
+							{/if}
+						</Command.Item>
+					{/each}
+				</Command.Group>
+			{/each}
+		</Command.List>
+	</Command.Dialog>
 
 	<MobileNotice />
 </div>

@@ -1,5 +1,6 @@
 import type { MediaAsset } from '$lib/editor/sidebar';
 import type { Track, Marker } from '$lib/editor/timeline';
+import type { PlayerAspectRatio, PlayerAspectRatioMode } from '$lib/editor/player';
 
 export type ProjectDocument = {
 	format: 'viko-project';
@@ -8,6 +9,8 @@ export type ProjectDocument = {
 	tracks: Track[];
 	mediaAssets: MediaAsset[];
 	markers: Marker[];
+	aspectRatio: PlayerAspectRatio;
+	aspectRatioMode: PlayerAspectRatioMode;
 	updatedAt: number;
 };
 

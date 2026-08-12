@@ -78,12 +78,7 @@ export async function decodeAudioAssets(
 			const arrayBuffer = await response.arrayBuffer();
 			const buffer = await decodeContext.decodeAudioData(arrayBuffer);
 			return [assetId, buffer] as const;
-		} catch (error) {
-			console.warn('[export] audio decode failed:', {
-				assetId,
-				srcPrefix: src.slice(0, 30),
-				error
-			});
+		} catch {
 			return null;
 		}
 	});

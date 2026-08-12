@@ -6,7 +6,17 @@ export function createProjectSnapshot(document: ProjectDocument): ProjectDocumen
 		...document,
 		tracks: cloneTracks(document.tracks),
 		mediaAssets: document.mediaAssets.map((asset) => ({ ...asset })),
-		markers: (document.markers ?? []).map((marker) => ({ ...marker }))
+		markers: (document.markers ?? []).map((marker) => ({ ...marker })),
+		// rebuild nested objects as plain values — Svelte state proxies are not
+		// structured-cloneable and would make IndexedDB puts throw DataCloneError
+		aspectRatio:
+			document.aspectRatio &&
+			Number.isFinite(document.aspectRatio.width) &&
+			document.aspectRatio.width > 0 &&
+			Number.isFinite(document.aspectRatio.height) &&
+			document.aspectRatio.height > 0
+				? { width: document.aspectRatio.width, height: document.aspectRatio.height }
+				: { width: 16, height: 9 }
 	};
 }
 

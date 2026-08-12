@@ -74,8 +74,7 @@ async function getReversedBuffer(src: string): Promise<AudioBuffer | null> {
 			const arrayBuffer = await response.arrayBuffer();
 			const buffer = await getContext().decodeAudioData(arrayBuffer);
 			return reverseAudioBuffer(buffer);
-		} catch (error) {
-			console.warn('[reverse] audio decode failed:', error);
+		} catch {
 			return null;
 		}
 	})();

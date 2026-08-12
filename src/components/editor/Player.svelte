@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onDestroy } from 'svelte';
 	import { Button } from '$lib/components/ui/button';
+	import * as Popover from '$lib/components/ui/popover';
 	import * as Select from '$lib/components/ui/select';
 	import { getEffectVisualState, getClipTransitionVisualState } from '$lib/effects';
 	import {
@@ -8,14 +9,17 @@
 		formatPlayerAspectRatio,
 		formatPlayerTime,
 		getActivePlayerLayers,
+		getTemplatePreviewSize,
 		PLAYER_ASPECT_RATIOS,
 		PLAYER_ASPECT_RATIO_PRESETS,
 		PLAYER_PLAYBACK_RATES,
+		SOCIAL_TEMPLATES,
 		snapVisualPosition,
 		type PlayerAspectRatio,
 		type PlayerAspectRatioMode,
 		type PlayerAspectRatioPresetId,
-		type PlayerLayer
+		type PlayerLayer,
+		type SocialTemplate
 	} from '$lib/editor/player';
 	import type { MediaAsset } from '$lib/editor/sidebar';
 	import {
@@ -47,6 +51,7 @@
 		Expand,
 		Film,
 		Grid3X3,
+		LayoutTemplate,
 		Maximize,
 		Minimize,
 		Minus,
@@ -68,11 +73,13 @@
 		playbackRate?: number;
 		loopEnabled?: boolean;
 		aspectRatio?: PlayerAspectRatio;
+		aspectRatioMode?: PlayerAspectRatioMode;
 		selectedClipId?: string | null;
 		onVisualUpdate?: (
 			clipId: string,
 			update: { transform?: VisualTransform; color?: string }
 		) => void;
+		onAspectSettingsChange?: () => void;
 	};
 
 	type VisualDrag = {
@@ -110,18 +117,20 @@
 		playbackRate = $bindable(1),
 		loopEnabled = $bindable(false),
 		aspectRatio = $bindable({ width: 16, height: 9 } as PlayerAspectRatio),
+		aspectRatioMode = $bindable<PlayerAspectRatioMode>('auto'),
 		selectedClipId = $bindable(null),
 		onVisualUpdate = () => {},
-		onPlaybackChange = () => {}
+		onPlaybackChange = () => {},
+		onAspectSettingsChange = () => {}
 	}: Props = $props();
 
 	let playerRoot = $state<HTMLElement | null>(null);
 	let playerCanvas = $state<HTMLElement | null>(null);
-	let aspectRatioMode = $state<PlayerAspectRatioMode>('auto');
 	let previewZoom = $state(100);
 	let previewMuted = $state(false);
 	let previewVolume = $state(1);
 	let showGuides = $state(false);
+	let templatePopoverOpen = $state(false);
 	let isFullscreen = $state(false);
 	let visualDrag: VisualDrag | null = null;
 	let visualResize: VisualResize | null = null;
@@ -228,19 +237,34 @@
 		aspectRatio = reference.ratio;
 	});
 
+	function applyAspectRatioPreset(presetId: PlayerAspectRatioPresetId): boolean {
+		const preset = PLAYER_ASPECT_RATIOS[presetId];
+		if (!preset) return false;
+		aspectRatioMode = presetId;
+		aspectRatio = { ...preset };
+		aspectRatioOverrideKey = ratioReference?.key ?? null;
+		return true;
+	}
+
 	function handleAspectRatioChange(value: string) {
 		sound.select();
 		if (value === 'auto') {
 			aspectRatioMode = 'auto';
 			aspectRatioOverrideKey = null;
 			if (ratioReference) aspectRatio = ratioReference.ratio;
+			onAspectSettingsChange();
 			return;
 		}
-		const preset = PLAYER_ASPECT_RATIOS[value as PlayerAspectRatioPresetId];
-		if (!preset) return;
-		aspectRatioMode = value as PlayerAspectRatioPresetId;
-		aspectRatio = { ...preset };
-		aspectRatioOverrideKey = ratioReference?.key ?? null;
+		if (applyAspectRatioPreset(value as PlayerAspectRatioPresetId)) {
+			onAspectSettingsChange();
+		}
+	}
+
+	function applySocialTemplate(template: SocialTemplate) {
+		sound.select();
+		applyAspectRatioPreset(template.ratioLabel);
+		templatePopoverOpen = false;
+		onAspectSettingsChange();
 	}
 
 	function togglePlayback() {
@@ -543,6 +567,63 @@
 		{/if}
 
 		<div class="flex items-center gap-0.5 rounded-md bg-background/60 p-0.5">
+			<Popover.Root bind:open={templatePopoverOpen}>
+				<Popover.Trigger>
+					{#snippet child({ props })}
+						<Button
+							{...props}
+							variant="ghost"
+							size="icon-xs"
+							class="text-muted-foreground transition-all hover:text-foreground"
+							aria-label="Social media templates"
+							title="Social media templates"
+						>
+							<LayoutTemplate class="size-4" />
+						</Button>
+					{/snippet}
+				</Popover.Trigger>
+				<Popover.Content align="start" side="bottom" sideOffset={6} class="w-64 p-1.5">
+					<div class="flex flex-col gap-0.5 p-1">
+						<span
+							class="px-1.5 pt-1 pb-1.5 text-[10px] font-bold tracking-wider text-muted-foreground uppercase"
+						>
+							Social templates
+						</span>
+						{#each SOCIAL_TEMPLATES as template (template.id)}
+							{@const preview = getTemplatePreviewSize(template)}
+							<button
+								type="button"
+								title={template.description}
+								class="group flex w-full items-center gap-2.5 rounded-md px-1.5 py-1.5 text-left transition-colors hover:bg-secondary/60"
+								onclick={() => applySocialTemplate(template)}
+							>
+								<span
+									class="flex shrink-0 items-center justify-center rounded-[3px] bg-background ring-1 ring-border"
+									style:width={`${preview.width}px`}
+									style:height={`${preview.height}px`}
+								></span>
+								<span class="min-w-0 flex-1">
+									<span class="flex items-center gap-1.5">
+										<span class="truncate text-xs font-semibold text-foreground">{template.name}</span>
+										<span
+											class="shrink-0 rounded-sm bg-secondary px-1 py-px text-[9px] font-medium text-muted-foreground tabular-nums"
+										>
+											{template.ratioLabel}
+										</span>
+									</span>
+									<span class="block truncate text-[10px] text-muted-foreground">
+										{template.platform}
+									</span>
+									<span class="block truncate text-[9px] text-muted-foreground/70 tabular-nums">
+										{template.resolutionLabel} · export keeps this ratio
+									</span>
+								</span>
+							</button>
+						{/each}
+					</div>
+				</Popover.Content>
+			</Popover.Root>
+
 			<Select.Root type="single" value={aspectRatioMode} onValueChange={handleAspectRatioChange}>
 				<Select.Trigger
 					size="sm"
