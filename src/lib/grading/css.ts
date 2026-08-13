@@ -44,6 +44,16 @@ function getLumaBandParts(grade: ColorGrade, amount: number): string[] {
 	return parts;
 }
 
+// some grade features (secondary qualifiers and imported .cube luts) cannot be
+// expressed as css filters; those clips are rendered through an exact canvas
+// pass instead, so the css preview must stay neutral for them
+import { isSecondaryActive } from './defaults';
+
+export function isGradeCssExpressible(grade: ColorGrade | undefined): boolean {
+	if (!grade) return true;
+	return grade.customLut === null && !isSecondaryActive(grade.secondary);
+}
+
 // build the deterministic css filter used by the player preview
 // curves are exact (svg feComponentTransfer), the master wheel is exact,
 // luma-keyed wheels and luts are deterministic approximations of the export pipeline
@@ -52,6 +62,7 @@ export function getColorGradePreviewFilter(
 	curveFilterId: string | null
 ): string {
 	if (!grade || isNeutralGrade(grade)) return '';
+	if (!isGradeCssExpressible(grade)) return '';
 	const amount = grade.intensity / 100;
 	const parts: string[] = [];
 

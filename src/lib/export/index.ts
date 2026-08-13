@@ -12,8 +12,7 @@ import {
 	FRAME_RATE,
 	getClipChromaKeyState,
 	getClipSourceTime,
-	getClipVisualState,
-	getColorAdjustFilter
+	getClipVisualState
 } from '$lib/editor/timeline';
 import type { MediaAsset } from '$lib/editor/sidebar';
 import { applyChromaKey, isChromaKeyActive } from '$lib/chroma';
@@ -21,6 +20,7 @@ import { applyColorGrade, isNeutralGrade, type ColorGrade } from '$lib/grading';
 import {
 	getClipPairTransitionProgress,
 	getClipTransitionVisualState,
+	getEffectVisualState,
 	type ClipTransitionVisualState,
 	type TransitionRole
 } from '$lib/effects';
@@ -93,6 +93,7 @@ type ExportOptions = {
 type LoadedClip = {
 	clip: Clip;
 	clipId: string;
+	isAdjustment: boolean;
 	startTime: number;
 	duration: number;
 	sourceStart: number;
@@ -550,6 +551,7 @@ function collectVisualClips(tracks: Track[], mediaAssets: MediaAsset[]): LoadedC
 	for (const track of tracks) {
 		if (track.type === 'audio') continue;
 		if (track.type === 'video' && track.muted) continue;
+		if (track.type === 'adjustment' && track.muted) continue;
 		for (const clip of track.clips) {
 			const asset = getAssetById(mediaAssets, clip.assetId);
 			const element = asset ? createMediaElement(asset) : null;
@@ -557,6 +559,7 @@ function collectVisualClips(tracks: Track[], mediaAssets: MediaAsset[]): LoadedC
 			clips.push({
 				clip,
 				clipId: clip.id,
+				isAdjustment: track.type === 'adjustment',
 				startTime: clip.startTime,
 				duration: clip.duration,
 				sourceStart: clip.sourceStart ?? 0,
@@ -609,8 +612,89 @@ async function waitForMediaReady(clips: LoadedClip[]): Promise<void> {
 	await Promise.all(promises);
 }
 
+// fit the media inside the frame preserving its aspect ratio (object-fit: contain),
+// matching how the Player preview letterboxes media whose ratio differs from the canvas
+function getContainFitRect(
+	mediaWidth: number,
+	mediaHeight: number,
+	canvasWidth: number,
+	canvasHeight: number
+): { x: number; y: number; width: number; height: number } {
+	const safeWidth = Number.isFinite(mediaWidth) && mediaWidth > 0 ? mediaWidth : canvasWidth;
+	const safeHeight = Number.isFinite(mediaHeight) && mediaHeight > 0 ? mediaHeight : canvasHeight;
+	const scale = Math.min(canvasWidth / safeWidth, canvasHeight / safeHeight);
+	const width = safeWidth * scale;
+	const height = safeHeight * scale;
+	return {
+		x: (canvasWidth - width) / 2,
+		y: (canvasHeight - height) / 2,
+		width,
+		height
+	};
+}
+
 // draw the clip content (media, text, sticker) into the given context
 // the color adjust filter is applied here so grading composes in a stable order
+// parse a CSS length (px or %) against the canvas size, matching the full-canvas
+// layer used by the preview when resolving percentage transform values
+function parseCssLength(value: string, reference: number): number {
+	const trimmed = (value ?? '').trim();
+	if (trimmed.endsWith('%')) return (parseFloat(trimmed) / 100) * reference;
+	return parseFloat(trimmed);
+}
+
+// apply a CSS transform string (as produced by getEffectVisualState) to a canvas
+// context. functions are applied left-to-right, each in the local coordinate system
+// of the previous one, mirroring CSS transform composition semantics.
+function applyCssTransform(
+	ctx: CanvasRenderingContext2D,
+	transform: string,
+	canvasWidth: number,
+	canvasHeight: number
+) {
+	const functionPattern = /([a-zA-Z]+)\(([^)]*)\)/g;
+	let match: RegExpExecArray | null;
+	while ((match = functionPattern.exec(transform)) !== null) {
+		const name = match[1];
+		const args = match[2].split(',').map((arg) => arg.trim());
+		switch (name) {
+			case 'translate': {
+				ctx.translate(
+					parseCssLength(args[0], canvasWidth),
+					parseCssLength(args[1] ?? '0', canvasHeight)
+				);
+				break;
+			}
+			case 'translateX': {
+				ctx.translate(parseCssLength(args[0], canvasWidth), 0);
+				break;
+			}
+			case 'translateY': {
+				ctx.translate(0, parseCssLength(args[0], canvasHeight));
+				break;
+			}
+			case 'rotate': {
+				ctx.rotate((parseFloat(args[0]) * Math.PI) / 180);
+				break;
+			}
+			case 'scale': {
+				const scaleX = parseFloat(args[0]);
+				const scaleY = parseFloat(args[1] ?? args[0]);
+				ctx.scale(scaleX, scaleY);
+				break;
+			}
+			case 'skewX': {
+				ctx.transform(1, 0, Math.tan((parseFloat(args[0]) * Math.PI) / 180), 1, 0, 0);
+				break;
+			}
+			case 'skewY': {
+				ctx.transform(1, Math.tan((parseFloat(args[0]) * Math.PI) / 180), 0, 1, 0, 0);
+				break;
+			}
+		}
+	}
+}
+
 function drawClipContent(
 	ctx: CanvasRenderingContext2D,
 	clip: LoadedClip,
@@ -623,9 +707,21 @@ function drawClipContent(
 	// video seeking is handled separately in seekClipsToTime before rendering
 	if (clip.element) {
 		if (clip.element instanceof HTMLVideoElement && clip.element.readyState >= 2) {
-			ctx.drawImage(clip.element, 0, 0, canvasWidth, canvasHeight);
+			const rect = getContainFitRect(
+				clip.element.videoWidth,
+				clip.element.videoHeight,
+				canvasWidth,
+				canvasHeight
+			);
+			ctx.drawImage(clip.element, rect.x, rect.y, rect.width, rect.height);
 		} else if (clip.element instanceof HTMLImageElement && clip.element.complete) {
-			ctx.drawImage(clip.element, 0, 0, canvasWidth, canvasHeight);
+			const rect = getContainFitRect(
+				clip.element.naturalWidth,
+				clip.element.naturalHeight,
+				canvasWidth,
+				canvasHeight
+			);
+			ctx.drawImage(clip.element, rect.x, rect.y, rect.width, rect.height);
 		}
 	}
 
@@ -720,7 +816,8 @@ function drawClipOnCanvas(
 	currentTime: number,
 	canvasWidth: number,
 	canvasHeight: number,
-	transition?: RenderTransition
+	transition?: RenderTransition,
+	skipGrade = false
 ) {
 	const localTime = currentTime - clip.startTime;
 	if (localTime < 0 || localTime > clip.duration) return;
@@ -728,10 +825,20 @@ function drawClipOnCanvas(
 	ctx.save();
 
 	const { transform, opacity, colorAdjust } = getClipVisualState(clip.clip, localTime);
-	const colorFilter = getColorAdjustFilter(colorAdjust);
+	// merge preset effects (shake, glitch, filters, transitions) with the clip's color
+	// adjustment and opacity, matching the preview's getEffectVisualState composition
+	const effectState = getEffectVisualState(
+		clip.clip.effects ?? [],
+		localTime,
+		clip.duration,
+		colorAdjust,
+		opacity
+	);
+	const renderFilter = effectState.filter !== 'none' ? effectState.filter : '';
 
 	const transitionOpacity = transition?.state.opacity ?? 1;
-	if (opacity * transitionOpacity < 1) ctx.globalAlpha = opacity * transitionOpacity;
+	if (effectState.opacity * transitionOpacity < 1)
+		ctx.globalAlpha = effectState.opacity * transitionOpacity;
 
 	if (transform) {
 		const centerX = (transform.x / 100) * canvasWidth;
@@ -781,6 +888,15 @@ function drawClipOnCanvas(
 		ctx.clip();
 	}
 
+	// apply preset effect transforms (shake, glitch, drift, slide, zoom) pivoting around
+	// the layer center, matching the preview's inner-layer transform which composes
+	// effect transforms before clip-pair transition transforms
+	if (effectState.transform && effectState.transform !== 'none') {
+		ctx.translate(canvasWidth / 2, canvasHeight / 2);
+		applyCssTransform(ctx, effectState.transform, canvasWidth, canvasHeight);
+		ctx.translate(-canvasWidth / 2, -canvasHeight / 2);
+	}
+
 	const transitionTranslateX = transition?.state.translateXPercent ?? 0;
 	if (transitionTranslateX !== 0) {
 		ctx.translate((transitionTranslateX / 100) * canvasWidth, 0);
@@ -793,11 +909,35 @@ function drawClipOnCanvas(
 	}
 
 	const grade = clip.clip.colorGrade;
-	if (grade && !isNeutralGrade(grade)) {
-		const graded = getGradedCanvas(clip, localTime, canvasWidth, canvasHeight, colorFilter, grade);
+	if (!skipGrade && grade && !isNeutralGrade(grade)) {
+		const graded = getGradedCanvas(clip, localTime, canvasWidth, canvasHeight, renderFilter, grade);
 		ctx.drawImage(graded, 0, 0, canvasWidth, canvasHeight);
 	} else {
-		drawClipContent(ctx, clip, canvasWidth, canvasHeight, colorFilter);
+		// chroma key is part of the base composition, not the grade: apply it here
+		// too (skipped grading, neutral grade, or plain key without a grade) so the
+		// before/after view and exports match what the player previews
+		const chromaKeyState = isChromaKeyActive(clip.clip.chromaKey)
+			? getClipChromaKeyState(clip.clip, localTime)
+			: null;
+		if (!chromaKeyState) {
+			drawClipContent(ctx, clip, canvasWidth, canvasHeight, renderFilter);
+		} else {
+			// the key needs per-pixel access, so draw to an offscreen canvas first and
+			// composite the keyed result, preserving the layer transform on ctx
+			const offscreen = document.createElement('canvas');
+			offscreen.width = canvasWidth;
+			offscreen.height = canvasHeight;
+			const offscreenContext = offscreen.getContext('2d', { willReadFrequently: true });
+			if (!offscreenContext) {
+				drawClipContent(ctx, clip, canvasWidth, canvasHeight, renderFilter);
+			} else {
+				drawClipContent(offscreenContext, clip, canvasWidth, canvasHeight, renderFilter);
+				const imageData = offscreenContext.getImageData(0, 0, canvasWidth, canvasHeight);
+				applyChromaKey(imageData, chromaKeyState);
+				offscreenContext.putImageData(imageData, 0, 0);
+				ctx.drawImage(offscreen, 0, 0);
+			}
+		}
 	}
 
 	ctx.restore();
@@ -828,7 +968,81 @@ function getRenderTransitions(
 	return transitions;
 }
 
-function renderFrame(canvas: HTMLCanvasElement, clips: LoadedClip[], currentTime: number) {
+export type ComposedFrameOptions = {
+	/** render the raw composition without any color grading (for before/after views) */
+	skipGrade?: boolean;
+};
+
+// an adjustment layer re-filters the already-composited frame below it: the
+// current canvas state is snapshotted, graded (exact per-pixel), then redrawn
+// with the preset effect filter, effect transform and opacity applied on top.
+// because renderFrame iterates clips bottom-to-top, everything painted before
+// the adjustment is exactly what it applies to; layers above it draw later and
+// stay untouched.
+function applyAdjustmentLayer(
+	ctx: CanvasRenderingContext2D,
+	clip: LoadedClip,
+	currentTime: number,
+	canvasWidth: number,
+	canvasHeight: number
+) {
+	const localTime = currentTime - clip.startTime;
+	if (localTime < 0 || localTime > clip.duration) return;
+
+	const { transform, opacity, colorAdjust } = getClipVisualState(clip.clip, localTime);
+	const effectState = getEffectVisualState(
+		clip.clip.effects ?? [],
+		localTime,
+		clip.duration,
+		colorAdjust,
+		opacity
+	);
+	const renderFilter = effectState.filter !== 'none' ? effectState.filter : '';
+	const grade = clip.clip.colorGrade;
+
+	// nothing to apply: skip the snapshot round-trip
+	if (
+		!renderFilter &&
+		(!grade || isNeutralGrade(grade)) &&
+		(!effectState.transform || effectState.transform === 'none') &&
+		effectState.opacity >= 1
+	) {
+		return;
+	}
+
+	const offscreen = document.createElement('canvas');
+	offscreen.width = canvasWidth;
+	offscreen.height = canvasHeight;
+	const offscreenContext = offscreen.getContext('2d', { willReadFrequently: true });
+	if (!offscreenContext) return;
+	offscreenContext.drawImage(ctx.canvas, 0, 0);
+
+	// exact per-pixel grading first (curves, wheels, luts, secondary qualifiers)
+	if (grade && !isNeutralGrade(grade)) {
+		const imageData = offscreenContext.getImageData(0, 0, canvasWidth, canvasHeight);
+		applyColorGrade(imageData, grade);
+		offscreenContext.putImageData(imageData, 0, 0);
+	}
+
+	ctx.save();
+	// effect transforms (shake, glitch, drift, zoom) pivot around the frame center
+	if (effectState.transform && effectState.transform !== 'none') {
+		ctx.translate(canvasWidth / 2, canvasHeight / 2);
+		applyCssTransform(ctx, effectState.transform, canvasWidth, canvasHeight);
+		ctx.translate(-canvasWidth / 2, -canvasHeight / 2);
+	}
+	if (renderFilter) ctx.filter = renderFilter;
+	ctx.globalAlpha = effectState.opacity;
+	ctx.drawImage(offscreen, 0, 0);
+	ctx.restore();
+}
+
+function renderFrame(
+	canvas: HTMLCanvasElement,
+	clips: LoadedClip[],
+	currentTime: number,
+	options?: ComposedFrameOptions
+) {
 	const ctx = canvas.getContext('2d');
 	if (!ctx) return;
 
@@ -840,13 +1054,22 @@ function renderFrame(canvas: HTMLCanvasElement, clips: LoadedClip[], currentTime
 	const transitions = getRenderTransitions(clips, currentTime);
 	for (const clip of clips) {
 		if (clip.startTime <= currentTime && currentTime < clip.startTime + clip.duration) {
+			if (clip.isAdjustment) {
+				// the before/after split view shows the ungraded composition, so
+				// adjustment layers are skipped along with per-clip grading
+				if (options?.skipGrade !== true) {
+					applyAdjustmentLayer(ctx, clip, currentTime, canvas.width, canvas.height);
+				}
+				continue;
+			}
 			drawClipOnCanvas(
 				ctx,
 				clip,
 				currentTime,
 				canvas.width,
 				canvas.height,
-				transitions.get(clip.clip.id)
+				transitions.get(clip.clip.id),
+				options?.skipGrade === true
 			);
 		}
 	}
@@ -1161,4 +1384,86 @@ async function exportWithWebCodecs(
 		onProgress,
 		exportDuration
 	);
+}
+
+export type FrameExportFormat = 'png' | 'jpeg';
+
+export type FrameExportOptions = {
+	tracks: Track[];
+	mediaAssets: MediaAsset[];
+	/** timeline time (seconds) of the frame to capture */
+	time: number;
+	/** output pixel dimensions */
+	resolution: ExportResolution;
+	format?: FrameExportFormat;
+	/** JPEG quality 0-1, ignored for PNG */
+	quality?: number;
+};
+
+// a reusable composed-frame renderer for live analysis: scopes, before/after
+// split view and shot matching all render through the same pipeline the export
+// uses, so what you see is what ends up in the final video.
+// keep the renderer alive across calls and dispose() it when done.
+export type ComposedFrameRenderer = {
+	render: (
+		canvas: HTMLCanvasElement,
+		time: number,
+		options?: ComposedFrameOptions
+	) => Promise<void>;
+	dispose: () => void;
+};
+
+export function createFrameRenderer(
+	tracks: Track[],
+	mediaAssets: MediaAsset[]
+): ComposedFrameRenderer {
+	let clips = collectVisualClips(tracks, mediaAssets);
+	let readyPromise: Promise<void> | null = null;
+	let disposed = false;
+
+	return {
+		async render(canvas, time, options) {
+			if (disposed) return;
+			if (!readyPromise) {
+				// tolerate failed assets: anything that fails to load simply stays
+				// invisible in the composed frame
+				readyPromise = waitForMediaReady(clips).catch(() => {});
+			}
+			await readyPromise;
+			if (disposed) return;
+			await seekClipsToTime(clips, time);
+			if (disposed) return;
+			renderFrame(canvas, clips, time, options);
+		},
+		dispose() {
+			disposed = true;
+			cleanupClips(clips);
+			clips = [];
+		}
+	};
+}
+
+// capture a single composed frame at the given timeline time as an image blob.
+// Reuses the same render pipeline that exports video frames, so grading, effects,
+// transitions and captions all appear exactly as they would in the exported video.
+export async function exportFrame(options: FrameExportOptions): Promise<Blob | null> {
+	const { tracks, mediaAssets, time, resolution, format = 'png' } = options;
+	// video frames are rendered at exact multiples of 1/FRAME_RATE — snap to the
+	// frame boundary so the captured image matches the video frame at this instant
+	const frameTime = Math.round(time * FRAME_RATE) / FRAME_RATE;
+	const clips = collectVisualClips(tracks, mediaAssets);
+	try {
+		await waitForMediaReady(clips);
+		const canvas = document.createElement('canvas');
+		canvas.width = Math.max(2, Math.round(resolution.width));
+		canvas.height = Math.max(2, Math.round(resolution.height));
+		await seekClipsToTime(clips, frameTime);
+		renderFrame(canvas, clips, frameTime);
+		const mimeType = format === 'jpeg' ? 'image/jpeg' : 'image/png';
+		return await new Promise<Blob | null>((resolve) => {
+			canvas.toBlob(resolve, mimeType, format === 'jpeg' ? (options.quality ?? 0.92) : undefined);
+		});
+	} finally {
+		cleanupClips(clips);
+	}
 }

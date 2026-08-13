@@ -65,6 +65,9 @@
 		) => void;
 		onAddKeyframes: (clipId: string, properties: KeyframeProperty[], time: number) => void;
 		onRemoveKeyframesAtTime: (clipId: string, time: number) => void;
+		matchSources?: { id: string; name: string }[];
+		onMatchColor?: (sourceClipId: string) => void;
+		matching?: boolean;
 	};
 
 	let {
@@ -75,7 +78,10 @@
 		onToggleReverse = () => {},
 		onAddKeyframe,
 		onAddKeyframes,
-		onRemoveKeyframesAtTime
+		onRemoveKeyframesAtTime,
+		matchSources = [],
+		onMatchColor,
+		matching = false
 	}: Props = $props();
 
 	const MAX_FADE_DURATION = 5;
@@ -785,7 +791,14 @@
 
 			<!-- color grading -->
 			{#if !isAudioClip}
-				<GradingPanel grade={clip.colorGrade} {allowLut} onGradeChange={handleGradeChange} />
+				<GradingPanel
+					grade={clip.colorGrade}
+					{allowLut}
+					onGradeChange={handleGradeChange}
+					{matchSources}
+					{onMatchColor}
+					{matching}
+				/>
 			{/if}
 
 			<!-- keyframes -->

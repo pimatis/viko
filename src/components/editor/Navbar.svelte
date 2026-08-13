@@ -30,7 +30,9 @@
 		Keyboard,
 		History,
 		Loader2,
-		Check
+		Check,
+		Camera,
+		FileImage
 	} from '@lucide/svelte';
 
 	type Props = {
@@ -44,9 +46,11 @@
 		exportQuality?: ExportQuality;
 		exportResolution?: ExportResolution | null;
 		isExporting?: boolean;
+		isCapturingFrame?: boolean;
 		exportQualities?: ExportQuality[];
 		onExportQualityChange?: (qualityId: string) => void;
 		onExport?: () => void;
+		onCaptureFrame?: (format: 'png' | 'jpeg') => void;
 		onNewProject?: () => void;
 		onOpenProject?: () => void;
 		onSave?: () => void;
@@ -79,10 +83,12 @@
 			bitrate: '3000k'
 		} as ExportQuality),
 		isExporting = false,
+		isCapturingFrame = false,
 		exportQualities = [],
 		exportResolution = null,
 		onExportQualityChange = () => {},
 		onExport = () => {},
+		onCaptureFrame = () => {},
 		onNewProject = () => {},
 		onOpenProject = () => {},
 		onSave = () => {},
@@ -279,9 +285,16 @@
 		<!-- left: brand + sidebar toggle + menus -->
 		<div class="flex min-w-0 items-center gap-1.5">
 			<a href="/" class="flex shrink-0 items-center gap-2 text-foreground">
-				<img src="/assets/logos/logo.png" alt="Viko" class="h-7 w-auto shrink-0" draggable="false" />
+				<img
+					src="/assets/logos/logo.png"
+					alt="Viko"
+					class="h-7 w-auto shrink-0"
+					draggable="false"
+				/>
 				<span class="text-base font-bold tracking-tight">Viko</span>
-				<Badge class="ml-1.5 h-[18px] rounded-full px-1.5 text-[10px] font-semibold tracking-wider">BETA</Badge>
+				<Badge class="ml-1.5 h-[18px] rounded-full px-1.5 text-[10px] font-semibold tracking-wider"
+					>BETA</Badge
+				>
 			</a>
 
 			<div class="h-4 w-px shrink-0 bg-border"></div>
@@ -756,6 +769,46 @@
 					Export ({formatShortcut(exportShortcut)})
 				</Tooltip.Content>
 			</Tooltip.Root>
+
+			<!-- capture frame button -->
+			<DropdownMenu.Root>
+				<DropdownMenu.Trigger>
+					{#snippet child({ props })}
+						<Button
+							{...props}
+							variant="outline"
+							size="sm"
+							disabled={isCapturingFrame || isExporting}
+							class="gap-1.5 text-xs font-semibold"
+						>
+							{#if isCapturingFrame}
+								<Loader2 class="size-4 animate-spin" />
+							{:else}
+								<Camera class="size-4" />
+							{/if}
+							<span class="hidden sm:inline">Frame</span>
+						</Button>
+					{/snippet}
+				</DropdownMenu.Trigger>
+				<DropdownMenu.Content align="end" sideOffset={8}>
+					<DropdownMenu.Group>
+						<DropdownMenu.Label>Capture current frame</DropdownMenu.Label>
+						<DropdownMenu.Item onSelect={() => onCaptureFrame('png')}>
+							<FileImage class="mr-2 size-4" />
+							PNG
+						</DropdownMenu.Item>
+						<DropdownMenu.Item onSelect={() => onCaptureFrame('jpeg')}>
+							<FileImage class="mr-2 size-4" />
+							JPG
+						</DropdownMenu.Item>
+						{#if exportResolution}
+							<div class="px-2 pt-1 pb-0.5 text-[10px] text-muted-foreground tabular-nums">
+								{exportResolution.width}x{exportResolution.height} at playhead
+							</div>
+						{/if}
+					</DropdownMenu.Group>
+				</DropdownMenu.Content>
+			</DropdownMenu.Root>
 		</div>
 	</header>
 </Tooltip.Provider>

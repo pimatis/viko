@@ -24,6 +24,8 @@ export function createVersionSnapshot(version: ProjectVersion): ProjectVersion {
 	return {
 		id: version.id,
 		createdAt: version.createdAt,
-		document: createProjectSnapshot(version.document)
+		document: createProjectSnapshot(version.document),
+		// thumbnail is a plain data-URL string, safe to persist alongside the version
+		...(version.thumbnail ? { thumbnail: version.thumbnail } : {})
 	};
 }

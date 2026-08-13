@@ -3,7 +3,7 @@ import { cloneColorGradeOrNull, type ColorGrade } from '$lib/grading';
 import { DEFAULT_CHROMA_KEY } from '$lib/chroma';
 import type { TextStyle } from './text';
 
-export type TrackType = 'video' | 'audio' | 'subtitle';
+export type TrackType = 'video' | 'audio' | 'subtitle' | 'adjustment';
 
 // CSS mix-blend-mode keywords supported by the layer compositor
 export type BlendMode =
@@ -231,11 +231,6 @@ export type Marker = {
 	time: number;
 	label: string;
 	color: string;
-};
-
-export type InOutPoints = {
-	in: number | null;
-	out: number | null;
 };
 
 export type Clip = {
@@ -856,7 +851,7 @@ export function moveGroupedClips(
 	);
 }
 
-export function interpolateKeyframes(
+function interpolateKeyframes(
 	keyframes: Keyframe[],
 	clipTime: number,
 	property: KeyframeProperty
@@ -932,7 +927,7 @@ export function getClipKeyframeValue(
 	clipTime: number,
 	property: KeyframeProperty
 ): number {
-	if (property === 'opacity') return getClipOpacity(clip, clipTime) * 100;
+	if (property === 'opacity') return getClipVisualState(clip, clipTime).opacity * 100;
 	const state = getClipVisualState(clip, clipTime);
 	if (property === 'x' || property === 'y' || property === 'scale' || property === 'rotation') {
 		return state.transform[property];
@@ -1058,7 +1053,7 @@ export function getClipSourceTime(clip: Clip, clipTime: number): number {
 
 // longest clip time that consumes at most maxSourceOffset source seconds
 // used to bound right-edge trims against the persisted source duration
-export function getClipSourceLimitDuration(clip: Clip, maxSourceOffset: number): number {
+function getClipSourceLimitDuration(clip: Clip, maxSourceOffset: number): number {
 	if (maxSourceOffset <= 0) return 0;
 	const keyframes = getClipKeyframeIndex(clip);
 	const series = keyframes.speed;
@@ -1324,10 +1319,6 @@ export function getColorAdjustFilter(adjust: ColorAdjust | undefined): string {
 		parts.push(`hue-rotate(${adjust.hue}deg)`);
 	}
 	return parts.join(' ');
-}
-
-export function getClipOpacity(clip: Clip, clipTime: number): number {
-	return getClipVisualState(clip, clipTime).opacity;
 }
 
 export function getClipVisualTransform(clip: Clip, clipTime: number): VisualTransform {

@@ -26,7 +26,8 @@
 		getColorGradePreviewFilter,
 		getCurveFilterId,
 		getCurveFilterTables,
-		hasActiveCurves
+		hasActiveCurves,
+		isGradeCssExpressible
 	} from '$lib/grading';
 	import {
 		MAX_VISUAL_SCALE,
@@ -44,10 +45,15 @@
 	import { collectDuckSources, getDuckingFactorAtTime, isDuckSource } from '$lib/audio/ducking';
 	import { isChromaKeyActive } from '$lib/chroma';
 	import ChromaKeyLayer from './ChromaKeyLayer.svelte';
+	import GradedLayer from './GradedLayer.svelte';
 	import ReverseAudioLayer from './ReverseAudioLayer.svelte';
+	import ScopesPanel from './ScopesPanel.svelte';
+	import SplitViewOverlay from './SplitViewOverlay.svelte';
 	import { cn } from '$lib/utils';
 	import { sound } from '$lib/sound';
 	import {
+		Activity,
+		Columns2,
 		Expand,
 		Film,
 		Grid3X3,
@@ -124,6 +130,17 @@
 		onAspectSettingsChange = () => {}
 	}: Props = $props();
 
+	// An adjustment layer applies its effects/grading to every visual layer below
+	// it (in track stacking order) that overlaps its time range. The preview builds
+	// a nested tree of 'band' nodes: each band is a full-frame wrapper whose CSS
+	// filter/transform/opacity is applied to the whole composited group beneath it.
+	type PreviewRenderNode = {
+		key: string;
+		kind: 'layer' | 'band';
+		layer: PlayerLayer;
+		children?: PreviewRenderNode[];
+	};
+
 	let playerRoot = $state<HTMLElement | null>(null);
 	let playerCanvas = $state<HTMLElement | null>(null);
 	let previewZoom = $state(100);
@@ -132,6 +149,8 @@
 	let showGuides = $state(false);
 	let templatePopoverOpen = $state(false);
 	let isFullscreen = $state(false);
+	let scopesOpen = $state(false);
+	let splitViewOpen = $state(false);
 	let visualDrag: VisualDrag | null = null;
 	let visualResize: VisualResize | null = null;
 	let snapGuideX = $state<number | null>(null);
@@ -200,9 +219,38 @@
 
 	const assetsById = $derived(new Map(mediaAssets.map((asset) => [asset.id, asset])));
 	const activeLayers = $derived(getActivePlayerLayers(tracks, assetsById, currentTime));
-	const visualLayers = $derived(
+	const compositedLayers = $derived(
 		activeLayers.filter((layer) => !layer.asset || layer.asset.kind !== 'audio')
 	);
+	const visualLayers = $derived(
+		compositedLayers.filter((layer) => layer.trackType !== 'adjustment')
+	);
+	const adjustmentLayers = $derived(
+		compositedLayers.filter((layer) => layer.trackType === 'adjustment')
+	);
+
+	// nested band tree: each adjustment layer absorbs everything rendered below it
+	// (the previous band plus any plain layers in between) into its own wrapper
+	const renderTree = $derived.by(() => {
+		const root: PreviewRenderNode[] = [];
+		let lastBand: PreviewRenderNode | null = null;
+		let index = 0;
+		for (const layer of compositedLayers) {
+			const key = `${layer.trackId}-${layer.clip.sourceInstanceId ?? layer.clip.id}-${index}`;
+			index += 1;
+			if (layer.trackType !== 'adjustment') {
+				root.push({ key, kind: 'layer', layer });
+				continue;
+			}
+			const children: PreviewRenderNode[] = [];
+			if (lastBand) children.push(lastBand);
+			children.push(...root.splice(0));
+			const band: PreviewRenderNode = { key, kind: 'band', layer, children };
+			root.push(band);
+			lastBand = band;
+		}
+		return root;
+	});
 	const audioLayers = $derived(activeLayers.filter((layer) => layer.asset?.kind === 'audio'));
 	const duckSources = $derived(collectDuckSources(tracks));
 	const currentTimeLabel = $derived(formatPlayerTime(currentTime));
@@ -604,7 +652,9 @@
 								></span>
 								<span class="min-w-0 flex-1">
 									<span class="flex items-center gap-1.5">
-										<span class="truncate text-xs font-semibold text-foreground">{template.name}</span>
+										<span class="truncate text-xs font-semibold text-foreground"
+											>{template.name}</span
+										>
 										<span
 											class="shrink-0 rounded-sm bg-secondary px-1 py-px text-[9px] font-medium text-muted-foreground tabular-nums"
 										>
@@ -643,6 +693,39 @@
 					{/each}
 				</Select.Content>
 			</Select.Root>
+
+			<Button
+				variant="ghost"
+				size="icon-xs"
+				class={cn(
+					'text-muted-foreground transition-all hover:text-foreground',
+					scopesOpen && 'bg-secondary text-foreground shadow-sm'
+				)}
+				onclick={() => {
+					sound.select();
+					scopesOpen = !scopesOpen;
+				}}
+				aria-label="Toggle scopes"
+				title="Scopes (waveform, vectorscope, histogram, parade)"
+			>
+				<Activity class="size-4" />
+			</Button>
+			<Button
+				variant="ghost"
+				size="icon-xs"
+				class={cn(
+					'text-muted-foreground transition-all hover:text-foreground',
+					splitViewOpen && 'bg-secondary text-foreground shadow-sm'
+				)}
+				onclick={() => {
+					sound.select();
+					splitViewOpen = !splitViewOpen;
+				}}
+				aria-label="Toggle before/after split view"
+				title="Before / after split view"
+			>
+				<Columns2 class="size-4" />
+			</Button>
 
 			<div class="h-3.5 w-px bg-border"></div>
 
@@ -691,192 +774,274 @@
 				class="size-full"
 				style="transform: scale({previewZoom / 100}); transform-origin: center center"
 			>
-				{#each visualLayers as layer, index (`${layer.trackId}-${layer.clip.sourceInstanceId ?? layer.clip.id}-${index}`)}
-					{@const visualState = getClipVisualState(layer.clip, layer.clipTime)}
-					{@const effectStyle = getEffectVisualState(
-						layer.clip.effects ?? [],
-						layer.clipTime,
-						layer.clip.duration,
-						visualState.colorAdjust,
-						visualState.opacity
-					)}
-					{@const curveFilterId = layer.clip.colorGrade ? getCurveFilterId(layer.clip.id) : null}
-					{@const gradeFilter = getColorGradePreviewFilter(layer.clip.colorGrade, curveFilterId)}
-					{@const transitionState =
-						layer.transitionRole && layer.transitionProgress !== undefined
-							? getClipTransitionVisualState(
-									layer.transitionPresetId ?? '',
-									layer.transitionRole,
-									layer.transitionProgress
-								)
-							: null}
-					{@const layerOpacity = transitionState
-						? effectStyle.opacity * transitionState.opacity
-						: effectStyle.opacity}
-					{@const layerTransform = transitionState
-						? combineTransforms(effectStyle.transform, transitionState.transform)
-						: effectStyle.transform}
-					{@const visualTransform = visualState.transform}
-					{@const maskStyle = visualTransform.mask
-						? getClipMaskStyle(visualTransform.mask)
-						: undefined}
-					<div
-						class={cn(
-							'absolute inset-0 cursor-move touch-none overflow-hidden',
-							(selectedClipId
-								? selectedClipId !== layer.clip.id
-								: topVisualLayerId !== layer.clip.id) && 'pointer-events-none',
-							layer.trackLocked && 'cursor-not-allowed'
+				{#snippet renderNode(node: PreviewRenderNode)}
+					{#if node.kind === 'band'}
+						{@const layer = node.layer}
+						{@const bandVisualState = getClipVisualState(layer.clip, layer.clipTime)}
+						{@const bandEffectStyle = getEffectVisualState(
+							layer.clip.effects ?? [],
+							layer.clipTime,
+							layer.clip.duration,
+							bandVisualState.colorAdjust,
+							bandVisualState.opacity
 						)}
-						style:z-index={index + 1}
-						style:mix-blend-mode={visualTransform.blendMode !== 'normal'
-							? visualTransform.blendMode
+						{@const bandCurveFilterId = layer.clip.colorGrade
+							? getCurveFilterId(layer.clip.id)
+							: null}
+						{@const bandGradeFilter = getColorGradePreviewFilter(
+							layer.clip.colorGrade,
+							bandCurveFilterId
+						)}
+						{@const bandMaskStyle = bandVisualState.transform.mask
+							? getClipMaskStyle(bandVisualState.transform.mask)
 							: undefined}
-						onpointerdown={(event) => startVisualDrag(event, layer)}
-						onlostpointercapture={(event) => finishVisualDrag(event)}
-						onkeydown={(event) => handleLayerKeydown(event, layer)}
-						role="button"
-						tabindex="0"
-						aria-label={`Move ${layer.clip.name}`}
-					>
-						{#if layer.clip.colorGrade && hasActiveCurves(layer.clip.colorGrade.curves) && curveFilterId}
-							{@const curveTables = getCurveFilterTables(layer.clip.colorGrade.curves)}
-							<svg class="absolute size-0" aria-hidden="true">
-								<defs>
-									<filter id={curveFilterId} color-interpolation-filters="sRGB">
-										<feComponentTransfer>
-											<feFuncR type="table" tableValues={curveTables.red} />
-											<feFuncG type="table" tableValues={curveTables.green} />
-											<feFuncB type="table" tableValues={curveTables.blue} />
-											<feFuncA type="linear" slope="1" />
-										</feComponentTransfer>
-										<feComponentTransfer>
-											<feFuncR type="table" tableValues={curveTables.master} />
-											<feFuncG type="table" tableValues={curveTables.master} />
-											<feFuncB type="table" tableValues={curveTables.master} />
-											<feFuncA type="linear" slope="1" />
-										</feComponentTransfer>
-									</filter>
-								</defs>
-							</svg>
-						{/if}
+						<div
+							class="pointer-events-none absolute inset-0"
+							style:filter={combineFilters(bandEffectStyle.filter, bandGradeFilter)}
+							style:opacity={bandEffectStyle.opacity}
+							style:clip-path={bandMaskStyle}
+							style:transform={bandEffectStyle.transform !== 'none'
+								? bandEffectStyle.transform
+								: undefined}
+						>
+							{#if layer.clip.colorGrade && hasActiveCurves(layer.clip.colorGrade.curves) && bandCurveFilterId}
+								{@const curveTables = getCurveFilterTables(layer.clip.colorGrade.curves)}
+								<svg class="absolute size-0" aria-hidden="true">
+									<defs>
+										<filter id={bandCurveFilterId} color-interpolation-filters="sRGB">
+											<feComponentTransfer>
+												<feFuncR type="table" tableValues={curveTables.red} />
+												<feFuncG type="table" tableValues={curveTables.green} />
+												<feFuncB type="table" tableValues={curveTables.blue} />
+												<feFuncA type="linear" slope="1" />
+											</feComponentTransfer>
+											<feComponentTransfer>
+												<feFuncR type="table" tableValues={curveTables.master} />
+												<feFuncG type="table" tableValues={curveTables.master} />
+												<feFuncB type="table" tableValues={curveTables.master} />
+												<feFuncA type="linear" slope="1" />
+											</feComponentTransfer>
+										</filter>
+									</defs>
+								</svg>
+							{/if}
+							{#each node.children as child (child.key)}
+								{@render renderNode(child)}
+							{/each}
+						</div>
+					{:else}
+						{@const layer = node.layer}
+						{@const visualState = getClipVisualState(layer.clip, layer.clipTime)}
+						{@const effectStyle = getEffectVisualState(
+							layer.clip.effects ?? [],
+							layer.clipTime,
+							layer.clip.duration,
+							visualState.colorAdjust,
+							visualState.opacity
+						)}
+						{@const curveFilterId = layer.clip.colorGrade ? getCurveFilterId(layer.clip.id) : null}
+						{@const gradeFilter = getColorGradePreviewFilter(layer.clip.colorGrade, curveFilterId)}
+						{@const chromaActive = isChromaKeyActive(layer.clip.chromaKey)}
+						{@const needsGradedCanvas = Boolean(
+							layer.clip.colorGrade &&
+							(layer.asset?.kind === 'video' || layer.asset?.kind === 'image') &&
+							!isGradeCssExpressible(layer.clip.colorGrade)
+						)}
+						{@const transitionState =
+							layer.transitionRole && layer.transitionProgress !== undefined
+								? getClipTransitionVisualState(
+										layer.transitionPresetId ?? '',
+										layer.transitionRole,
+										layer.transitionProgress
+									)
+								: null}
+						{@const layerOpacity = transitionState
+							? effectStyle.opacity * transitionState.opacity
+							: effectStyle.opacity}
+						{@const layerTransform = transitionState
+							? combineTransforms(effectStyle.transform, transitionState.transform)
+							: effectStyle.transform}
+						{@const visualTransform = visualState.transform}
+						{@const maskStyle = visualTransform.mask
+							? getClipMaskStyle(visualTransform.mask)
+							: undefined}
 						<div
 							class={cn(
-								'absolute inset-0',
-								selectedClipId === layer.clip.id &&
-									'outline outline-1 -outline-offset-1 outline-primary'
+								'absolute inset-0 cursor-move touch-none overflow-hidden',
+								(selectedClipId
+									? selectedClipId !== layer.clip.id
+									: topVisualLayerId !== layer.clip.id) && 'pointer-events-none',
+								layer.trackLocked && 'cursor-not-allowed'
 							)}
-							style:transform={getTransformStyle(visualTransform)}
+							style:mix-blend-mode={visualTransform.blendMode !== 'normal'
+								? visualTransform.blendMode
+								: undefined}
+							onpointerdown={(event) => startVisualDrag(event, layer)}
+							onlostpointercapture={(event) => finishVisualDrag(event)}
+							onkeydown={(event) => handleLayerKeydown(event, layer)}
+							role="button"
+							tabindex="0"
+							aria-label={`Move ${layer.clip.name}`}
 						>
-							<div class="size-full" style:clip-path={maskStyle}>
-								<div
-									class="size-full overflow-hidden"
-									style:filter={combineFilters(effectStyle.filter, gradeFilter)}
-									style:transform={layerTransform}
-									style:opacity={layerOpacity}
-									style:clip-path={transitionState?.clipInsetRightPercent
-										? `inset(0 ${transitionState.clipInsetRightPercent}% 0 0)`
-										: 'none'}
-								>
-									{#if layer.asset?.playbackSupported === false}
-										<div
-											class="flex size-full items-center justify-center px-6 text-center text-xs text-muted-foreground"
-										>
-											{layer.asset.name} requires a compatible proxy
-										</div>
-									{:else if layer.asset?.kind === 'video' || layer.asset?.kind === 'image'}
-										{#if isChromaKeyActive(layer.clip.chromaKey)}
-											<ChromaKeyLayer
-												src={layer.asset.src}
-												mediaKind={layer.asset.kind}
-												sourceTime={layer.sourceTime}
-												{isPlaying}
-												muted={previewMuted || layer.trackMuted || layer.clip.reversed === true}
-												syncEveryTick={layer.clip.reversed === true}
-												reversed={layer.clip.reversed === true}
-												playbackRate={getLayerPlaybackRate(layer)}
-												volume={getLayerEffectiveVolume(layer, visualState)}
-												config={getClipChromaKeyState(layer.clip, layer.clipTime)}
-											/>
-										{:else if layer.asset?.kind === 'video'}
-											<video
-												src={layer.asset.src}
-												playsinline
-												preload="auto"
-												class="pointer-events-none size-full object-contain"
-												use:syncMedia={{
-													time: layer.sourceTime,
-													playing: isPlaying,
-													muted: previewMuted || layer.trackMuted || layer.clip.reversed === true,
-													playbackRate: getLayerPlaybackRate(layer),
-													syncEveryTick: layer.clip.reversed === true,
-													reversed: layer.clip.reversed === true
-												}}
-												use:syncMediaVolume={getLayerEffectiveVolume(layer, visualState)}
+							{#if layer.clip.colorGrade && hasActiveCurves(layer.clip.colorGrade.curves) && curveFilterId}
+								{@const curveTables = getCurveFilterTables(layer.clip.colorGrade.curves)}
+								<svg class="absolute size-0" aria-hidden="true">
+									<defs>
+										<filter id={curveFilterId} color-interpolation-filters="sRGB">
+											<feComponentTransfer>
+												<feFuncR type="table" tableValues={curveTables.red} />
+												<feFuncG type="table" tableValues={curveTables.green} />
+												<feFuncB type="table" tableValues={curveTables.blue} />
+												<feFuncA type="linear" slope="1" />
+											</feComponentTransfer>
+											<feComponentTransfer>
+												<feFuncR type="table" tableValues={curveTables.master} />
+												<feFuncG type="table" tableValues={curveTables.master} />
+												<feFuncB type="table" tableValues={curveTables.master} />
+												<feFuncA type="linear" slope="1" />
+											</feComponentTransfer>
+										</filter>
+									</defs>
+								</svg>
+							{/if}
+							<div
+								class={cn(
+									'absolute inset-0',
+									selectedClipId === layer.clip.id &&
+										'outline outline-1 -outline-offset-1 outline-primary'
+								)}
+								style:transform={getTransformStyle(visualTransform)}
+							>
+								<div class="size-full" style:clip-path={maskStyle}>
+									<div
+										class="size-full overflow-hidden"
+										style:filter={combineFilters(effectStyle.filter, gradeFilter)}
+										style:transform={layerTransform}
+										style:opacity={layerOpacity}
+										style:clip-path={transitionState?.clipInsetRightPercent
+											? `inset(0 ${transitionState.clipInsetRightPercent}% 0 0)`
+											: 'none'}
+									>
+										{#if layer.asset?.playbackSupported === false}
+											<div
+												class="flex size-full items-center justify-center px-6 text-center text-xs text-muted-foreground"
 											>
-												<track kind="captions" />
-											</video>
-											{#if layer.clip.reversed === true}
-												<ReverseAudioLayer
+												{layer.asset.name} requires a compatible proxy
+											</div>
+										{:else if layer.asset?.kind === 'video' || layer.asset?.kind === 'image'}
+											{#if needsGradedCanvas}
+												<GradedLayer
 													src={layer.asset.src}
+													mediaKind={layer.asset.kind}
 													sourceTime={layer.sourceTime}
 													{isPlaying}
-													rate={getLayerPlaybackRate(layer)}
+													muted={previewMuted || layer.trackMuted || layer.clip.reversed === true}
+													syncEveryTick={layer.clip.reversed === true}
+													reversed={layer.clip.reversed === true}
+													playbackRate={getLayerPlaybackRate(layer)}
 													volume={getLayerEffectiveVolume(layer, visualState)}
+													grade={layer.clip.colorGrade!}
+													chromaConfig={chromaActive
+														? getClipChromaKeyState(layer.clip, layer.clipTime)
+														: null}
+												/>
+											{:else if chromaActive}
+												<ChromaKeyLayer
+													src={layer.asset.src}
+													mediaKind={layer.asset.kind}
+													sourceTime={layer.sourceTime}
+													{isPlaying}
+													muted={previewMuted || layer.trackMuted || layer.clip.reversed === true}
+													syncEveryTick={layer.clip.reversed === true}
+													reversed={layer.clip.reversed === true}
+													playbackRate={getLayerPlaybackRate(layer)}
+													volume={getLayerEffectiveVolume(layer, visualState)}
+													config={getClipChromaKeyState(layer.clip, layer.clipTime)}
+												/>
+											{:else if layer.asset?.kind === 'video'}
+												<video
+													src={layer.asset.src}
+													playsinline
+													preload="auto"
+													class="pointer-events-none size-full object-contain"
+													use:syncMedia={{
+														time: layer.sourceTime,
+														playing: isPlaying,
+														muted: previewMuted || layer.trackMuted || layer.clip.reversed === true,
+														playbackRate: getLayerPlaybackRate(layer),
+														syncEveryTick: layer.clip.reversed === true,
+														reversed: layer.clip.reversed === true
+													}}
+													use:syncMediaVolume={getLayerEffectiveVolume(layer, visualState)}
+												>
+													<track kind="captions" />
+												</video>
+												{#if layer.clip.reversed === true}
+													<ReverseAudioLayer
+														src={layer.asset.src}
+														sourceTime={layer.sourceTime}
+														{isPlaying}
+														rate={getLayerPlaybackRate(layer)}
+														volume={getLayerEffectiveVolume(layer, visualState)}
+													/>
+												{/if}
+											{:else}
+												<img
+													src={layer.asset.src}
+													alt={layer.clip.name}
+													class="pointer-events-none size-full object-contain"
 												/>
 											{/if}
-										{:else}
-											<img
-												src={layer.asset.src}
-												alt={layer.clip.name}
-												class="pointer-events-none size-full object-contain"
-											/>
-										{/if}
-									{:else if layer.clip.sticker}
-										<div
-											class="flex size-full items-center justify-center text-[clamp(64px,12vw,160px)]"
-											style:color={layer.clip.stickerColor ?? '#ffffff'}
-										>
-											{layer.clip.sticker}
-										</div>
-									{:else}
-										<div
-											class="flex size-full items-center justify-center px-6 text-center text-foreground"
-											style:font-family={layer.clip.textStyle?.fontFamily}
-											style:font-size={`${layer.clip.textStyle?.fontSize ?? 48}px`}
-											style:font-weight={layer.clip.textStyle?.fontWeight ?? 700}
-											style:color={layer.clip.textStyle?.color ?? '#ffffff'}
-											style:text-align={layer.clip.textStyle?.textAlign ?? 'center'}
-											style:text-transform={layer.clip.textStyle?.textTransform ?? 'none'}
-										>
-											<span
-												class="max-w-full px-2 py-1"
-												style:background-color={layer.clip.textStyle?.backgroundColor ??
-													'transparent'}
+										{:else if layer.clip.sticker}
+											<div
+												class="flex size-full items-center justify-center text-[clamp(64px,12vw,160px)]"
+												style:color={layer.clip.stickerColor ?? '#ffffff'}
 											>
-												{layer.clip.name}
-											</span>
-										</div>
-									{/if}
+												{layer.clip.sticker}
+											</div>
+										{:else}
+											<div
+												class="flex size-full items-center justify-center px-6 text-center text-foreground"
+												style:font-family={layer.clip.textStyle?.fontFamily}
+												style:font-size={`${layer.clip.textStyle?.fontSize ?? 48}px`}
+												style:font-weight={layer.clip.textStyle?.fontWeight ?? 700}
+												style:color={layer.clip.textStyle?.color ?? '#ffffff'}
+												style:text-align={layer.clip.textStyle?.textAlign ?? 'center'}
+												style:text-transform={layer.clip.textStyle?.textTransform ?? 'none'}
+											>
+												<span
+													class="max-w-full px-2 py-1"
+													style:background-color={layer.clip.textStyle?.backgroundColor ??
+														'transparent'}
+												>
+													{layer.clip.name}
+												</span>
+											</div>
+										{/if}
+									</div>
 								</div>
+								{#if selectedClipId === layer.clip.id && !layer.trackLocked}
+									{#each ['left-1 top-1 cursor-nwse-resize', 'right-1 top-1 cursor-nesw-resize', 'bottom-1 left-1 cursor-nesw-resize', 'bottom-1 right-1 cursor-nwse-resize'] as handle (handle)}
+										<button
+											type="button"
+											class={cn(
+												'absolute z-10 size-3 touch-none rounded-sm border-2 border-primary bg-background shadow-sm',
+												handle
+											)}
+											style:transform={`scale(${1 / visualTransform.scale})`}
+											data-resize-handle
+											onpointerdown={(event) => startVisualResize(event, layer)}
+											aria-label={`Resize ${layer.clip.name}`}
+										></button>
+									{/each}
+								{/if}
 							</div>
-							{#if selectedClipId === layer.clip.id && !layer.trackLocked}
-								{#each ['left-1 top-1 cursor-nwse-resize', 'right-1 top-1 cursor-nesw-resize', 'bottom-1 left-1 cursor-nesw-resize', 'bottom-1 right-1 cursor-nwse-resize'] as handle (handle)}
-									<button
-										type="button"
-										class={cn(
-											'absolute z-10 size-3 touch-none rounded-sm border-2 border-primary bg-background shadow-sm',
-											handle
-										)}
-										style:transform={`scale(${1 / visualTransform.scale})`}
-										data-resize-handle
-										onpointerdown={(event) => startVisualResize(event, layer)}
-										aria-label={`Resize ${layer.clip.name}`}
-									></button>
-								{/each}
-							{/if}
 						</div>
-					</div>
+					{/if}
+				{/snippet}
+
+				{#each renderTree as node (node.key)}
+					{@render renderNode(node)}
 				{/each}
 
 				{#each audioLayers as layer, index (`audio-${layer.trackId}-${layer.clip.sourceInstanceId ?? layer.clip.id}-${index}`)}
@@ -907,7 +1072,7 @@
 					{/if}
 				{/each}
 
-				{#if visualLayers.length === 0}
+				{#if visualLayers.length === 0 && adjustmentLayers.length === 0}
 					<div
 						class="flex size-full flex-col items-center justify-center gap-3 text-muted-foreground"
 					>
@@ -940,8 +1105,23 @@
 						style:top={snapGuideY === 100 ? 'calc(100% - 1px)' : `${snapGuideY}%`}
 					></div>
 				{/if}
+
+				{#if splitViewOpen}
+					<SplitViewOverlay {tracks} {mediaAssets} time={currentTime} {isPlaying} />
+				{/if}
 			</div>
 		</div>
+
+		{#if scopesOpen}
+			<ScopesPanel
+				{tracks}
+				{mediaAssets}
+				time={currentTime}
+				{isPlaying}
+				{aspectRatio}
+				onClose={() => (scopesOpen = false)}
+			/>
+		{/if}
 	</div>
 
 	<!-- bottom transport bar -->

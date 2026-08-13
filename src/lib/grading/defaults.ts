@@ -1,4 +1,11 @@
-import type { ColorCurvePoint, ColorCurves, ColorGrade, ColorWheel } from './types';
+import type {
+	ColorCurvePoint,
+	ColorCurves,
+	ColorGrade,
+	ColorWheel,
+	SecondaryCorrection,
+	SecondaryPowerWindow
+} from './types';
 
 export const DEFAULT_COLOR_WHEEL: ColorWheel = { hue: 0, saturation: 0, strength: 0 };
 
@@ -14,6 +21,33 @@ export const DEFAULT_COLOR_CURVES: ColorCurves = {
 	blue: [...IDENTITY_CURVE]
 };
 
+export const DEFAULT_SECONDARY_WINDOW: SecondaryPowerWindow = {
+	type: 'full',
+	cx: 50,
+	cy: 50,
+	width: 100,
+	height: 100,
+	feather: 20
+};
+
+export const DEFAULT_SECONDARY_CORRECTION: SecondaryCorrection = {
+	enabled: false,
+	hue: 0,
+	hueRange: 60,
+	satCenter: 50,
+	satRange: 100,
+	lumaCenter: 50,
+	lumaRange: 100,
+	softness: 30,
+	lumaWeight: 50,
+	hueShift: 0,
+	saturation: 0,
+	brightness: 0,
+	contrast: 0,
+	amount: 100,
+	window: { ...DEFAULT_SECONDARY_WINDOW }
+};
+
 export const DEFAULT_COLOR_GRADE: ColorGrade = {
 	shadows: { ...DEFAULT_COLOR_WHEEL },
 	midtones: { ...DEFAULT_COLOR_WHEEL },
@@ -26,6 +60,8 @@ export const DEFAULT_COLOR_GRADE: ColorGrade = {
 		blue: [...IDENTITY_CURVE]
 	},
 	lutId: null,
+	customLut: null,
+	secondary: { ...DEFAULT_SECONDARY_CORRECTION },
 	intensity: 100
 };
 
@@ -55,6 +91,63 @@ export function clampWheelStrength(strength: number): number {
 export function clampGradeIntensity(intensity: number): number {
 	if (!Number.isFinite(intensity)) return DEFAULT_COLOR_GRADE.intensity;
 	return Math.min(100, Math.max(0, intensity));
+}
+
+export function clampSecondaryHue(hue: number): number {
+	if (!Number.isFinite(hue)) return DEFAULT_SECONDARY_CORRECTION.hue;
+	return Math.min(360, Math.max(0, hue));
+}
+
+export function clampSecondaryRange(value: number): number {
+	if (!Number.isFinite(value)) return 60;
+	return Math.min(180, Math.max(1, value));
+}
+
+export function clampSecondaryPercent(value: number, fallback = 50): number {
+	if (!Number.isFinite(value)) return fallback;
+	return Math.min(100, Math.max(0, value));
+}
+
+export function clampSecondaryWindow(value: SecondaryPowerWindow): SecondaryPowerWindow {
+	return {
+		type: value.type === 'ellipse' || value.type === 'rect' ? value.type : 'full',
+		cx: clampSecondaryPercent(value.cx, 50),
+		cy: clampSecondaryPercent(value.cy, 50),
+		width: clampSecondaryPercent(value.width, 100),
+		height: clampSecondaryPercent(value.height, 100),
+		feather: clampSecondaryPercent(value.feather, 20)
+	};
+}
+
+export function clampSecondaryCorrection(value: SecondaryCorrection): SecondaryCorrection {
+	return {
+		enabled: value.enabled === true,
+		hue: clampSecondaryHue(value.hue),
+		hueRange: clampSecondaryRange(value.hueRange),
+		satCenter: clampSecondaryPercent(value.satCenter, 50),
+		satRange: Math.min(100, Math.max(1, clampSecondaryPercent(value.satRange, 100))),
+		lumaCenter: clampSecondaryPercent(value.lumaCenter, 50),
+		lumaRange: Math.min(100, Math.max(1, clampSecondaryPercent(value.lumaRange, 100))),
+		softness: clampSecondaryPercent(value.softness, 30),
+		lumaWeight: clampSecondaryPercent(value.lumaWeight, 50),
+		hueShift: clampWheelHue(value.hueShift),
+		saturation: clampWheelSaturation(value.saturation),
+		brightness: clampWheelSaturation(value.brightness),
+		contrast: clampWheelSaturation(value.contrast),
+		amount: clampSecondaryPercent(value.amount, 100),
+		window: clampSecondaryWindow(value.window)
+	};
+}
+
+export function isSecondaryActive(secondary: SecondaryCorrection | undefined): boolean {
+	if (!secondary?.enabled) return false;
+	if (secondary.amount <= 0) return false;
+	return (
+		secondary.hueShift !== 0 ||
+		secondary.saturation !== 0 ||
+		secondary.brightness !== 0 ||
+		secondary.contrast !== 0
+	);
 }
 
 export function clampCurvePoint(point: ColorCurvePoint): ColorCurvePoint {
@@ -109,6 +202,8 @@ export function isNeutralWheel(wheel: ColorWheel): boolean {
 export function isNeutralGrade(grade: ColorGrade): boolean {
 	return (
 		grade.lutId === null &&
+		grade.customLut === null &&
+		!isSecondaryActive(grade.secondary) &&
 		grade.intensity === 0 &&
 		isNeutralWheel(grade.master) &&
 		isNeutralWheel(grade.shadows) &&
@@ -131,6 +226,11 @@ export function cloneColorGrade(grade: ColorGrade): ColorGrade {
 			blue: grade.curves.blue.map((point) => ({ ...point }))
 		},
 		lutId: grade.lutId,
+		customLut: grade.customLut ? { ...grade.customLut } : null,
+		secondary: {
+			...grade.secondary,
+			window: { ...grade.secondary.window }
+		},
 		intensity: grade.intensity
 	};
 }

@@ -103,7 +103,8 @@
 		Mic,
 		Snowflake,
 		FlipHorizontal2,
-		X
+		X,
+		Layers
 	} from '@lucide/svelte';
 
 	type Props = {
@@ -740,6 +741,31 @@
 		commitTracks([...tracks, newTrack]);
 		activeTrackId = newTrack.id;
 		clearClipSelection();
+	}
+
+	// an adjustment layer is a full-frame clip whose effects and grading are
+	// applied to every visual clip below it that overlaps its time range
+	function addAdjustmentLayer() {
+		sound.select();
+		const clipId = createClipId();
+		const adjustmentClip: Clip = {
+			id: clipId,
+			name: 'Adjustment Layer',
+			startTime: 0,
+			duration: Math.max(1 / FRAME_RATE, duration)
+		};
+		const newTrack: Track = {
+			id: createTrackId(),
+			name: 'Adjustment Layer',
+			type: 'adjustment',
+			color: 'purple',
+			clips: [adjustmentClip],
+			muted: false,
+			locked: false
+		};
+		commitTracks([...tracks, newTrack]);
+		activeTrackId = newTrack.id;
+		setClipSelection([clipId]);
 	}
 
 	function insertRequestedClip(request: ClipInsertRequest) {
@@ -2480,6 +2506,14 @@
 												{track.name}
 											</button>
 										{/if}
+										{#if track.type === 'adjustment'}
+											<span
+												class="shrink-0 rounded-sm bg-purple-500/20 px-1 py-px text-[8px] font-bold tracking-wide text-purple-400 uppercase"
+												title="Adjustment layer - applies effects and grading to all clips below"
+											>
+												ADJ
+											</span>
+										{/if}
 										<div class="flex-1"></div>
 										<Tooltip.Provider delayDuration={400}>
 											<Tooltip.Root>
@@ -2731,6 +2765,9 @@
 										>
 											{#if asset?.kind === 'audio' && clip.assetId}
 												<Waveform src={asset.src} {pixelsPerSecond} volume={clip.volume ?? 1} />
+											{/if}
+											{#if track.type === 'adjustment' && clipWidth > 16}
+												<Layers class="size-3 shrink-0 text-purple-400" title="Adjustment layer" />
 											{/if}
 											<!-- svelte-ignore a11y_no_static_element_interactions -->
 											<span
@@ -3032,6 +3069,10 @@
 				<ContextMenu.Item onclick={addTrack}>
 					<ListPlus class="size-4" />
 					Add track
+				</ContextMenu.Item>
+				<ContextMenu.Item onclick={addAdjustmentLayer}>
+					<Layers class="size-4" />
+					Add adjustment layer
 				</ContextMenu.Item>
 				<ContextMenu.Item
 					variant="destructive"

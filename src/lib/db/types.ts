@@ -18,4 +18,6 @@ export type ProjectVersion = {
 	id: string;
 	createdAt: number;
 	document: ProjectDocument;
+	/** data URL of the first-frame preview rendered at snapshot time */
+	thumbnail?: string;
 };

@@ -37,9 +37,16 @@
 	>
 		<div class="mx-auto flex h-14 w-full max-w-6xl items-center justify-between px-4 sm:px-6">
 			<a href={resolve('/')} class="flex shrink-0 items-center gap-2 text-foreground">
-				<img src="/assets/logos/logo.png" alt="Viko" class="h-7 w-auto shrink-0" draggable="false" />
+				<img
+					src="/assets/logos/logo.png"
+					alt="Viko"
+					class="h-7 w-auto shrink-0"
+					draggable="false"
+				/>
 				<span class="text-base font-bold tracking-tight">Viko</span>
-				<Badge class="ml-1.5 h-[18px] rounded-full px-1.5 text-[10px] font-semibold tracking-wider">BETA</Badge>
+				<Badge class="ml-1.5 h-[18px] rounded-full px-1.5 text-[10px] font-semibold tracking-wider"
+					>BETA</Badge
+				>
 			</a>
 			<Button
 				variant="ghost"
@@ -97,7 +104,9 @@
 		<a href={resolve('/')} class="flex shrink-0 items-center gap-2 text-foreground">
 			<img src="/assets/logos/logo.png" alt="Viko" class="h-7 w-auto shrink-0" draggable="false" />
 			<span class="text-base font-bold tracking-tight">Viko</span>
-			<Badge class="ml-1.5 h-[18px] rounded-full px-1.5 text-[10px] font-semibold tracking-wider">BETA</Badge>
+			<Badge class="ml-1.5 h-[18px] rounded-full px-1.5 text-[10px] font-semibold tracking-wider"
+				>BETA</Badge
+			>
 		</a>
 
 		<nav class="hidden items-center gap-1 md:flex" aria-label="Primary">

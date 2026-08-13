@@ -1,5 +1,5 @@
 import type { MediaAsset } from './sidebar';
-import type { Clip, Track, VisualTransform } from './timeline';
+import type { Clip, Track, TrackType, VisualTransform } from './timeline';
 import { getClipSourceTime } from './timeline';
 import { getClipPairTransitionProgress, type TransitionRole } from '$lib/effects';
 
@@ -19,8 +19,6 @@ export const PLAYER_ASPECT_RATIOS: Record<PlayerAspectRatioPresetId, PlayerAspec
 export const PLAYER_ASPECT_RATIO_PRESETS = Object.keys(
 	PLAYER_ASPECT_RATIOS
 ) as PlayerAspectRatioPresetId[];
-
-export const DEFAULT_PLAYER_ASPECT_RATIO: PlayerAspectRatio = { width: 16, height: 9 };
 
 export type SocialTemplateId = 'reels' | 'portrait' | 'square' | 'landscape';
 
@@ -74,7 +72,10 @@ export const SOCIAL_TEMPLATES: SocialTemplate[] = [
 ];
 
 /** fit the template ratio inside a square thumbnail box, in px */
-export function getTemplatePreviewSize(template: SocialTemplate, maxSide = 30): { width: number; height: number } {
+export function getTemplatePreviewSize(
+	template: SocialTemplate,
+	maxSide = 30
+): { width: number; height: number } {
 	const ratio = template.ratio.width / template.ratio.height;
 	if (ratio >= 1) {
 		return { width: maxSide, height: Math.max(2, Math.round(maxSide / ratio)) };
@@ -126,6 +127,7 @@ export const PLAYER_SNAP_TARGETS = [0, 50, 100] as const;
 export type PlayerLayer = {
 	clip: Clip;
 	trackId: string;
+	trackType: TrackType;
 	trackMuted: boolean;
 	trackLocked: boolean;
 	asset: MediaAsset | null;
@@ -152,6 +154,7 @@ export function getActivePlayerLayers(
 			activeLayers.push({
 				clip,
 				trackId: track.id,
+				trackType: track.type,
 				trackMuted: track.muted,
 				trackLocked: track.locked,
 				asset: clip.assetId ? (assetsById.get(clip.assetId) ?? null) : null,

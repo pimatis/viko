@@ -133,15 +133,26 @@
 	import {
 		clampCurvePoints,
 		clampGradeIntensity,
+		clampSecondaryCorrection,
+		clampSecondaryPercent,
 		clampWheelHue,
 		clampWheelSaturation,
 		clampWheelStrength,
+		cloneColorGrade,
+		DEFAULT_COLOR_GRADE,
+		DEFAULT_SECONDARY_CORRECTION,
 		IDENTITY_CURVE,
 		isLutPresetId,
+		registerCubeLut,
 		type ColorCurvePoint,
 		type ColorGrade,
-		type ColorWheel
+		type ColorWheel,
+		type CubeLutRef,
+		type SecondaryCorrection,
+		type SecondaryPowerWindow
 	} from '$lib/grading';
+	import { computeBandStats } from '$lib/grading/scopes';
+	import { computeGradeMatch } from '$lib/grading/match';
 	import {
 		clampChromaSimilarity,
 		clampChromaSmoothness,
@@ -150,16 +161,15 @@
 	} from '$lib/chroma';
 	import {
 		exportVideo,
+		exportFrame,
+		createFrameRenderer,
 		EXPORT_QUALITIES,
 		DEFAULT_EXPORT_QUALITY,
 		getExportResolution,
 		type ExportQuality,
 		type ExportProgress
 	} from '$lib/export';
-	import {
-		PLAYER_ASPECT_RATIO_PRESETS,
-		type PlayerAspectRatioMode
-	} from '$lib/editor/player';
+	import { PLAYER_ASPECT_RATIO_PRESETS, type PlayerAspectRatioMode } from '$lib/editor/player';
 
 	let projectName = $state('Untitled Project');
 	let zoom = $state(100);
@@ -196,6 +206,8 @@
 	let playerAspectRatio = $state<{ width: number; height: number }>({ width: 16, height: 9 });
 	let aspectRatioMode = $state<PlayerAspectRatioMode>('auto');
 	let isExporting = $state(false);
+	let isCapturingFrame = $state(false);
+	let matchingClipId = $state<string | null>(null);
 	let exportProgress = $state<ExportProgress | null>(null);
 	let autoSaveBlocked = $state(false);
 	let isRestoringVersion = $state(false);
@@ -267,16 +279,109 @@
 				if (!isRecord(version) || typeof version.id !== 'string') return [];
 				const document = parseProjectDocument(version.document);
 				if (!document) return [];
-				return [{ id: version.id, createdAt: document.updatedAt, document }];
+				return [
+					{
+						id: version.id,
+						createdAt: document.updatedAt,
+						document,
+						thumbnail: typeof version.thumbnail === 'string' ? version.thumbnail : undefined
+					}
+				];
 			});
+			void backfillVersionThumbnails();
 		} catch {
 			versions = [];
 			versionsLoaded = false;
 		}
 	}
 
+	const thumbnailPendingIds = new Set<string>();
+	const THUMBNAIL_WIDTH = 320;
+
+	function getFirstVisualClipTime(tracks: Track[]): number | null {
+		let firstTime: number | null = null;
+		for (const track of tracks) {
+			if (track.type === 'audio') continue;
+			for (const clip of track.clips) {
+				if (firstTime === null || clip.startTime < firstTime) firstTime = clip.startTime;
+			}
+		}
+		return firstTime;
+	}
+
+	function blobToDataUrl(blob: Blob): Promise<string> {
+		return new Promise((resolve, reject) => {
+			const reader = new FileReader();
+			reader.onload = () => resolve(reader.result as string);
+			reader.onerror = () => reject(reader.error);
+			reader.readAsDataURL(blob);
+		});
+	}
+
+	// render the first visual frame of a snapshot through the export pipeline and
+	// persist it with the version. best-effort: never blocks saving, never rejects.
+	async function generateVersionThumbnail(
+		version: ProjectVersion,
+		tracksList = version.document.tracks,
+		assets = version.document.mediaAssets
+	): Promise<void> {
+		if (thumbnailPendingIds.has(version.id)) return;
+		const firstTime = getFirstVisualClipTime(tracksList);
+		if (firstTime === null) return;
+		thumbnailPendingIds.add(version.id);
+		try {
+			const aspect = version.document.aspectRatio;
+			const height =
+				aspect.width > 0 && aspect.height > 0
+					? Math.max(1, Math.round((THUMBNAIL_WIDTH * aspect.height) / aspect.width))
+					: Math.round((THUMBNAIL_WIDTH * 9) / 16);
+			const blob = await exportFrame({
+				tracks: tracksList,
+				mediaAssets: assets,
+				time: firstTime,
+				resolution: { width: THUMBNAIL_WIDTH, height },
+				format: 'jpeg',
+				quality: 0.8
+			});
+			if (!blob) return;
+			const dataUrl = await blobToDataUrl(blob);
+			versions = versions.map((candidate) =>
+				candidate.id === version.id ? { ...candidate, thumbnail: dataUrl } : candidate
+			);
+			await saveVersions(versions);
+		} catch {
+			// thumbnails are best-effort; keep the placeholder when rendering fails
+		} finally {
+			thumbnailPendingIds.delete(version.id);
+		}
+	}
+
+	// generate thumbnails for versions saved before this feature existed; their blob
+	// URLs are stale after a reload, so media is restored from IndexedDB first
+	async function backfillVersionThumbnails() {
+		for (const version of versions) {
+			if (version.thumbnail || thumbnailPendingIds.has(version.id)) continue;
+			if (getFirstVisualClipTime(version.document.tracks) === null) continue;
+			const restored = await restoreMediaAssets(version.document.mediaAssets);
+			const restoredUrls = restored
+				.map((asset) => asset.src)
+				.filter((src) => src.startsWith('blob:'));
+			try {
+				await generateVersionThumbnail(version, version.document.tracks, restored);
+			} finally {
+				for (const url of restoredUrls) URL.revokeObjectURL(url);
+			}
+		}
+	}
+
 	const selectedClip = $derived(
 		tracks.flatMap((track) => track.clips).find((clip) => clip.id === selectedClipId) ?? null
+	);
+	const matchSources = $derived(
+		tracks
+			.flatMap((track) => track.clips)
+			.filter((clip) => clip.id !== selectedClipId && Boolean(clip.assetId))
+			.map((clip) => ({ id: clip.id, name: clip.name }))
 	);
 	const playerClipTime = $derived(
 		selectedClip
@@ -1039,6 +1144,83 @@
 		return clampCurvePoints(points);
 	}
 
+	function sanitizeSecondary(value: unknown): SecondaryCorrection {
+		if (!isRecord(value)) return { ...DEFAULT_SECONDARY_CORRECTION };
+		const windowValue = isRecord(value.window) ? value.window : {};
+		const window: SecondaryPowerWindow = {
+			type:
+				windowValue.type === 'ellipse' || windowValue.type === 'rect' ? windowValue.type : 'full',
+			cx: clampSecondaryPercent(typeof windowValue.cx === 'number' ? windowValue.cx : 50, 50),
+			cy: clampSecondaryPercent(typeof windowValue.cy === 'number' ? windowValue.cy : 50, 50),
+			width: clampSecondaryPercent(
+				typeof windowValue.width === 'number' ? windowValue.width : 100,
+				100
+			),
+			height: clampSecondaryPercent(
+				typeof windowValue.height === 'number' ? windowValue.height : 100,
+				100
+			),
+			feather: clampSecondaryPercent(
+				typeof windowValue.feather === 'number' ? windowValue.feather : 20,
+				20
+			)
+		};
+		return clampSecondaryCorrection({
+			enabled: value.enabled === true,
+			hue: typeof value.hue === 'number' ? value.hue : DEFAULT_SECONDARY_CORRECTION.hue,
+			hueRange:
+				typeof value.hueRange === 'number' ? value.hueRange : DEFAULT_SECONDARY_CORRECTION.hueRange,
+			satCenter:
+				typeof value.satCenter === 'number'
+					? value.satCenter
+					: DEFAULT_SECONDARY_CORRECTION.satCenter,
+			satRange:
+				typeof value.satRange === 'number' ? value.satRange : DEFAULT_SECONDARY_CORRECTION.satRange,
+			lumaCenter:
+				typeof value.lumaCenter === 'number'
+					? value.lumaCenter
+					: DEFAULT_SECONDARY_CORRECTION.lumaCenter,
+			lumaRange:
+				typeof value.lumaRange === 'number'
+					? value.lumaRange
+					: DEFAULT_SECONDARY_CORRECTION.lumaRange,
+			softness:
+				typeof value.softness === 'number' ? value.softness : DEFAULT_SECONDARY_CORRECTION.softness,
+			lumaWeight:
+				typeof value.lumaWeight === 'number'
+					? value.lumaWeight
+					: DEFAULT_SECONDARY_CORRECTION.lumaWeight,
+			hueShift:
+				typeof value.hueShift === 'number' ? value.hueShift : DEFAULT_SECONDARY_CORRECTION.hueShift,
+			saturation:
+				typeof value.saturation === 'number'
+					? value.saturation
+					: DEFAULT_SECONDARY_CORRECTION.saturation,
+			brightness:
+				typeof value.brightness === 'number'
+					? value.brightness
+					: DEFAULT_SECONDARY_CORRECTION.brightness,
+			contrast:
+				typeof value.contrast === 'number' ? value.contrast : DEFAULT_SECONDARY_CORRECTION.contrast,
+			amount: typeof value.amount === 'number' ? value.amount : DEFAULT_SECONDARY_CORRECTION.amount,
+			window
+		});
+	}
+
+	function sanitizeCubeLut(value: unknown): CubeLutRef | null {
+		if (!isRecord(value)) return null;
+		if (typeof value.name !== 'string' || typeof value.source !== 'string') return null;
+		const name = value.name.trim().slice(0, 120);
+		const source = value.source.slice(0, 400_000);
+		if (!name || !source) return null;
+		try {
+			const lut = registerCubeLut(name, source);
+			return { id: lut.id, name: lut.name, source: lut.source };
+		} catch {
+			return null;
+		}
+	}
+
 	function sanitizeColorGrade(value: unknown): ColorGrade | undefined {
 		if (!isRecord(value)) return undefined;
 		const identity = [...IDENTITY_CURVE];
@@ -1057,6 +1239,8 @@
 			master: sanitizeWheel(value.master),
 			curves,
 			lutId: typeof value.lutId === 'string' && isLutPresetId(value.lutId) ? value.lutId : null,
+			customLut: sanitizeCubeLut(value.customLut),
+			secondary: sanitizeSecondary(value.secondary),
 			intensity: typeof value.intensity === 'number' ? clampGradeIntensity(value.intensity) : 100
 		};
 	}
@@ -1323,7 +1507,14 @@
 		if (!isRecord(value) || typeof value.id !== 'string' || typeof value.name !== 'string') {
 			return null;
 		}
-		if (value.type !== 'video' && value.type !== 'audio' && value.type !== 'subtitle') return null;
+		if (
+			value.type !== 'video' &&
+			value.type !== 'audio' &&
+			value.type !== 'subtitle' &&
+			value.type !== 'adjustment'
+		) {
+			return null;
+		}
 		if (!Array.isArray(value.clips)) return null;
 		const clips = value.clips.slice(0, MAX_TRACK_CLIPS).flatMap((clip) => {
 			const sanitized = sanitizeClip(clip);
@@ -1421,7 +1612,8 @@
 				(value.aspectRatioMode === 'auto' ||
 					(PLAYER_ASPECT_RATIO_PRESETS as readonly string[]).includes(value.aspectRatioMode))
 					? (value.aspectRatioMode as PlayerAspectRatioMode)
-					: 'auto',			updatedAt: typeof value.updatedAt === 'number' ? value.updatedAt : Date.now()
+					: 'auto',
+			updatedAt: typeof value.updatedAt === 'number' ? value.updatedAt : Date.now()
 		};
 	}
 
@@ -1505,6 +1697,110 @@
 		}
 	}
 
+	// shot matching: compare the target clip's current frame against a reference clip
+	// and derive wheel/curve adjustments that push the target toward the reference
+	async function handleMatchColor(referenceClipId: string) {
+		const target = selectedClip;
+		if (!target || matchingClipId) return;
+		const reference = tracks
+			.flatMap((track) => track.clips)
+			.find((clip) => clip.id === referenceClipId);
+		if (!reference?.assetId || !target.assetId) {
+			projectNotice = 'Both clips need media to match color';
+			return;
+		}
+		if (reference.id === target.id) return;
+		matchingClipId = target.id;
+		try {
+			await mediaRestorePromise;
+			const renderer = createFrameRenderer(tracks, mediaAssets);
+			try {
+				const canvas = document.createElement('canvas');
+				const safeAspect =
+					playerAspectRatio.width > 0 && playerAspectRatio.height > 0
+						? playerAspectRatio
+						: { width: 16, height: 9 };
+				canvas.width = 256;
+				canvas.height = Math.max(2, Math.round((256 * safeAspect.height) / safeAspect.width));
+				const context = canvas.getContext('2d', { willReadFrequently: true });
+				if (!context) return;
+				// sample the target at the current playhead, clamped inside the clip
+				const targetTime = Math.min(
+					target.startTime + target.duration - 1 / FRAME_RATE,
+					Math.max(target.startTime, currentTime)
+				);
+				const referenceTime = reference.startTime + reference.duration / 2;
+				await renderer.render(canvas, targetTime);
+				const targetStats = computeBandStats(
+					context.getImageData(0, 0, canvas.width, canvas.height)
+				);
+				await renderer.render(canvas, referenceTime);
+				const referenceStats = computeBandStats(
+					context.getImageData(0, 0, canvas.width, canvas.height)
+				);
+				const match = computeGradeMatch(targetStats, referenceStats);
+				handleClipPropertyChange(target.id, (c) => {
+					const grade = c.colorGrade ?? cloneColorGrade(DEFAULT_COLOR_GRADE);
+					return {
+						...c,
+						colorGrade: {
+							...grade,
+							shadows: { ...match.shadows },
+							midtones: { ...match.midtones },
+							highlights: { ...match.highlights },
+							curves: { ...grade.curves, master: match.masterCurve }
+						}
+					};
+				});
+				projectNotice = `Color matched to "${reference.name}"`;
+				sound.complete();
+			} finally {
+				renderer.dispose();
+			}
+		} catch {
+			projectNotice = 'Color match failed';
+			sound.error();
+		} finally {
+			matchingClipId = null;
+		}
+	}
+
+	async function handleCaptureFrame(format: 'png' | 'jpeg') {
+		if (isCapturingFrame || isExporting) return;
+		if (timelineContentEnd <= 0) {
+			projectNotice = 'Timeline is empty - nothing to capture';
+			return;
+		}
+		isCapturingFrame = true;
+		try {
+			const blob = await exportFrame({
+				tracks,
+				mediaAssets,
+				time: Math.min(currentTime, timelineContentEnd),
+				resolution: exportResolution,
+				format
+			});
+			if (!blob) {
+				projectNotice = 'Frame could not be captured';
+				return;
+			}
+			const extension = format === 'jpeg' ? 'jpg' : 'png';
+			const url = URL.createObjectURL(blob);
+			const link = documentElement('a');
+			link.href = url;
+			link.download = `${projectName.replace(/[^a-z0-9-_]+/gi, '-').replace(/^-|-$/g, '') || 'project'}-frame-${extension}`;
+			link.click();
+			setTimeout(() => URL.revokeObjectURL(url), 60_000);
+			projectNotice = `Frame captured (${exportResolution.width}x${exportResolution.height})`;
+			sound.complete();
+		} catch {
+			projectNotice = 'Frame could not be captured';
+			sound.error();
+		} finally {
+			isCapturingFrame = false;
+		}
+	}
+
 	async function saveProject() {
 		if (isSaving) return;
 		isSaving = true;
@@ -1522,6 +1818,9 @@
 			await Promise.all([saveProjectToDb(document), saveVersions(nextVersions)]);
 
 			versions = nextVersions;
+			// render and persist a first-frame preview for the new snapshot in the
+			// background so saving stays fast; the history dialog picks it up reactively
+			void generateVersionThumbnail(newVersion);
 			const isFirstSave = !autoSaveEnabled;
 			autoSaveEnabled = true;
 			autoSaveBlocked = false;
@@ -1870,6 +2169,8 @@
 			if (q) exportQuality = q;
 		}}
 		onExport={handleExportVideo}
+		{isCapturingFrame}
+		onCaptureFrame={handleCaptureFrame}
 		onNewProject={() => (newProjectDialogOpen = true)}
 		onOpenProject={() => openProjectInput?.click()}
 		onSave={() => void saveProject()}
@@ -1954,6 +2255,9 @@
 					onAddKeyframe={handleAddKeyframe}
 					onAddKeyframes={handleAddKeyframes}
 					onRemoveKeyframesAtTime={handleRemoveKeyframesAtTime}
+					{matchSources}
+					onMatchColor={handleMatchColor}
+					matching={matchingClipId === selectedClipId}
 				/>
 			</div>
 		{/if}
@@ -2091,7 +2395,9 @@
 			<!-- search bar -->
 			<div class="mb-3 border-b border-border pb-3">
 				<div class="relative">
-					<Search class="absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+					<Search
+						class="absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
+					/>
 					<Input
 						bind:value={versionSearchQuery}
 						type="search"
@@ -2119,6 +2425,22 @@
 								<div class="mt-1 w-px flex-1 bg-border"></div>
 							{/if}
 						</div>
+
+						<!-- first-frame preview thumbnail -->
+						{#if version.thumbnail}
+							<img
+								src={version.thumbnail}
+								alt={version.document.name}
+								class="mt-0.5 size-16 shrink-0 rounded-md border border-border bg-black object-cover"
+								loading="lazy"
+							/>
+						{:else}
+							<div
+								class="mt-0.5 flex size-16 shrink-0 items-center justify-center rounded-md border border-border bg-secondary/40 text-muted-foreground/60"
+							>
+								<Film class="size-4" />
+							</div>
+						{/if}
 
 						<!-- content -->
 						<div class="min-w-0 flex-1">

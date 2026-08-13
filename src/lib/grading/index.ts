@@ -4,13 +4,18 @@ export type {
 	ColorCurves,
 	CurveChannel,
 	LUTPreset,
-	ColorGrade
+	ColorGrade,
+	SecondaryCorrection,
+	SecondaryPowerWindow,
+	CubeLutRef
 } from './types';
 export {
 	DEFAULT_COLOR_WHEEL,
 	IDENTITY_CURVE,
 	DEFAULT_COLOR_CURVES,
 	DEFAULT_COLOR_GRADE,
+	DEFAULT_SECONDARY_CORRECTION,
+	DEFAULT_SECONDARY_WINDOW,
 	MAX_CURVE_POINTS,
 	SHADOW_BAND_WEIGHT,
 	MIDTONE_BAND_WEIGHT,
@@ -19,6 +24,11 @@ export {
 	clampWheelSaturation,
 	clampWheelStrength,
 	clampGradeIntensity,
+	clampSecondaryHue,
+	clampSecondaryRange,
+	clampSecondaryPercent,
+	clampSecondaryCorrection,
+	isSecondaryActive,
 	clampCurvePoint,
 	clampCurvePoints,
 	isIdentityCurve,
@@ -34,7 +44,18 @@ export {
 	getColorGradePreviewFilter,
 	getCurveFilterId,
 	getCurveFilterTables,
+	isGradeCssExpressible,
 	type CurveFilterTables
 } from './css';
 export { applyColorGrade } from './pixels';
 export { LUT_PRESETS, getLutPreset, isLutPresetId } from './luts';
+export {
+	parseCubeLut,
+	registerCubeLut,
+	getCubeLut,
+	listCubeLuts,
+	removeCubeLut,
+	ensureCubeLutRegistered,
+	applyCubeLut,
+	type CubeLut
+} from './cube';

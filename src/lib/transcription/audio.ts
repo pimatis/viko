@@ -1,5 +1,6 @@
 export const TRANSCRIBE_SAMPLE_RATE = 16_000;
-export const MAX_TRANSCRIBE_DURATION_SECONDS = 15 * 60;
+// media longer than this is rejected before decoding (about 15 minutes of audio)
+const MAX_TRANSCRIBE_DURATION_SECONDS = 15 * 60;
 
 // decode a media blob into a mono 16kHz sample buffer for speech models
 export async function decodeMediaToMono16k(blob: Blob): Promise<Float32Array> {
