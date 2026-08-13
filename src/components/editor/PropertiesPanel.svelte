@@ -47,7 +47,8 @@
 		Diamond,
 		Trash2,
 		GripHorizontal,
-		FlipHorizontal2
+		FlipHorizontal2,
+		AudioWaveform
 	} from '@lucide/svelte';
 	import GradingPanel from './GradingPanel.svelte';
 
@@ -68,6 +69,9 @@
 		matchSources?: { id: string; name: string }[];
 		onMatchColor?: (sourceClipId: string) => void;
 		matching?: boolean;
+		canNormalizeAudio?: boolean;
+		normalizing?: boolean;
+		onNormalizeAudio?: (clipId: string) => void;
 	};
 
 	let {
@@ -81,7 +85,10 @@
 		onRemoveKeyframesAtTime,
 		matchSources = [],
 		onMatchColor,
-		matching = false
+		matching = false,
+		canNormalizeAudio = false,
+		normalizing = false,
+		onNormalizeAudio = () => {}
 	}: Props = $props();
 
 	const MAX_FADE_DURATION = 5;
@@ -471,12 +478,24 @@
 					<input
 						type="range"
 						min="0"
-						max="1"
+						max="4"
 						step="0.01"
 						value={currentVolume}
 						oninput={handleVolumeChange}
 						class="h-1 w-full cursor-pointer accent-primary"
 					/>
+					{#if canNormalizeAudio && clip}
+						<Button
+							variant="outline"
+							size="sm"
+							class="mt-2 w-full"
+							onclick={() => onNormalizeAudio(clip.id)}
+							disabled={normalizing}
+						>
+							<AudioWaveform class="size-3.5" />
+							{normalizing ? 'Analyzing loudness…' : 'Normalize audio'}
+						</Button>
+					{/if}
 				</section>
 
 				<!-- audio fade -->

@@ -691,6 +691,263 @@ export function moveClip(
 	});
 }
 
+// Slip: shift the clip's source window without moving it on the timeline.
+// dragDelta is in timeline seconds (positive = later source). Frozen clips hold
+// a single frame, so slipping them moves which frame is held.
+export function slipClip(tracks: Track[], clipId: string, dragDelta: number): Track[] {
+	const sourceTrack = tracks.find((track) => track.clips.some((clip) => clip.id === clipId));
+	const clip = sourceTrack?.clips.find((candidate) => candidate.id === clipId);
+	if (!sourceTrack || !clip || sourceTrack.locked || !clip.assetId) return tracks;
+
+	const sourceStart = clip.sourceStart ?? 0;
+	const frozen = clip.frozen === true;
+	// source window the clip consumes; frozen clips hold a single frame
+	const windowSourceSize = frozen ? 1 / FRAME_RATE : getClipSourceOffset(clip, clip.duration);
+	const sourceLimit = clip.sourceDuration ?? Number.POSITIVE_INFINITY;
+	if (windowSourceSize > sourceLimit) return tracks;
+	const maxSourceStart = Math.max(0, sourceLimit - windowSourceSize);
+	// speed-aware source delta (signed: getClipSourceOffset clamps negatives)
+	const deltaSource =
+		dragDelta >= 0 ? getClipSourceOffset(clip, dragDelta) : -getClipSourceOffset(clip, -dragDelta);
+	if (deltaSource === 0) return tracks;
+	const nextSourceStart = roundToFrame(
+		Math.min(maxSourceStart, Math.max(0, sourceStart + deltaSource))
+	);
+	if (nextSourceStart === sourceStart) return tracks;
+	let changed = false;
+	const nextTracks = tracks.map((track) => {
+		if (track.id !== sourceTrack.id) return track;
+		return {
+			...track,
+			clips: track.clips.map((candidate) => {
+				if (candidate.id !== clipId) return candidate;
+				changed = true;
+				return { ...candidate, sourceStart: nextSourceStart };
+			})
+		};
+	});
+	return changed ? nextTracks : tracks;
+}
+
+// Rolling: drag the shared boundary between two adjacent clips. The boundary
+// moves by dragDelta while the combined duration of the pair stays constant.
+// Falls back to a plain edge trim when the dragged edge has no adjacent neighbor.
+export function rollingTrim(
+	tracks: Track[],
+	clipId: string,
+	edge: 'start' | 'end',
+	dragDelta: number,
+	timelineDuration: number
+): Track[] {
+	const sourceTrack = tracks.find((track) => track.clips.some((clip) => clip.id === clipId));
+	const clip = sourceTrack?.clips.find((candidate) => candidate.id === clipId);
+	if (!sourceTrack || !clip || sourceTrack.locked || dragDelta === 0) return tracks;
+
+	const sortedClips = sourceTrack.clips.slice().sort((a, b) => a.startTime - b.startTime);
+	const index = sortedClips.findIndex((candidate) => candidate.id === clipId);
+	if (index === -1) return tracks;
+	const isEndEdge = edge === 'end';
+	const boundary = isEndEdge ? clip.startTime + clip.duration : clip.startTime;
+	// the boundary sits between left (ends at boundary) and right (starts at it)
+	const left = isEndEdge ? sortedClips[index] : sortedClips[index - 1];
+	const right = isEndEdge ? sortedClips[index + 1] : sortedClips[index];
+	if (!left || !right || left.startTime + left.duration !== right.startTime) {
+		// no adjacent neighbor to roll against: treat as a plain edge trim
+		return resizeClip(tracks, clipId, edge, boundary + dragDelta, timelineDuration);
+	}
+
+	const minimumDuration = 1 / FRAME_RATE;
+	// left may extend right into its remaining source
+	const leftAvailableSource =
+		!left.frozen && left.sourceDuration
+			? getClipSourceLimitDuration(
+					left,
+					Math.max(0, (left.sourceDuration ?? 0) - (left.sourceStart ?? 0))
+				)
+			: timelineDuration - left.startTime;
+	const leftGrowRight =
+		Math.min(timelineDuration, left.startTime + leftAvailableSource) -
+		(left.startTime + left.duration);
+	const leftShrink = left.duration - minimumDuration;
+	// right may extend left into source before its sourceStart
+	const rightTrimLimit =
+		right.assetId && !right.frozen
+			? getClipSourceLimitDuration(right, Math.max(0, right.sourceStart ?? 0))
+			: 0;
+	const rightExtendLeft = Math.min(rightTrimLimit, right.startTime);
+	const rightShrink = right.duration - minimumDuration;
+
+	const maxRight = Math.min(leftGrowRight, rightShrink);
+	const maxLeft = Math.min(leftShrink, rightExtendLeft);
+	const d = Math.min(maxRight, Math.max(-maxLeft, dragDelta));
+	if (d === 0) return tracks;
+	const nextBoundary = roundToFrame(boundary + d);
+	const nextLeftDuration = roundToFrame(nextBoundary - left.startTime);
+	const nextRightDuration = roundToFrame(right.startTime + right.duration - nextBoundary);
+	const trimmed = nextBoundary - right.startTime;
+
+	let changed = false;
+	const nextTracks = tracks.map((track) => {
+		if (track.id !== sourceTrack.id) return track;
+		return {
+			...track,
+			clips: track.clips.map((candidate) => {
+				if (candidate.id === left.id) {
+					changed = true;
+					return {
+						...candidate,
+						duration: nextLeftDuration,
+						keyframes: trimClipKeyframesEnd(
+							candidate,
+							nextLeftDuration,
+							`${candidate.id}-rolling-end-${frameIndex(nextLeftDuration)}`
+						),
+						sourceStart:
+							candidate.frozen === true || candidate.reversed !== true
+								? candidate.sourceStart
+								: roundToFrame(getClipSourceTime(candidate, nextLeftDuration))
+					};
+				}
+				if (candidate.id === right.id) {
+					changed = true;
+					return {
+						...candidate,
+						startTime: nextBoundary,
+						duration: nextRightDuration,
+						keyframes: trimClipKeyframesStart(
+							candidate,
+							trimmed,
+							`${candidate.id}-rolling-start-${frameIndex(trimmed)}`
+						),
+						sourceStart:
+							candidate.assetId && candidate.frozen !== true && candidate.reversed !== true
+								? roundToFrame(
+										trimmed >= 0
+											? (candidate.sourceStart ?? 0) + getClipSourceOffset(candidate, trimmed)
+											: (candidate.sourceStart ?? 0) - getClipSourceOffset(candidate, -trimmed)
+									)
+								: candidate.sourceStart
+					};
+				}
+				return candidate;
+			})
+		};
+	});
+	return changed ? nextTracks : tracks;
+}
+
+// Slide: move a clip along the timeline while its neighbors trim to compensate.
+// The clip's own source window stays fixed; the neighbors' outer boundaries stay
+// put and the clip slides inside them.
+export function slideClip(
+	tracks: Track[],
+	clipId: string,
+	dragDelta: number,
+	timelineDuration: number
+): Track[] {
+	const sourceTrack = tracks.find((track) => track.clips.some((clip) => clip.id === clipId));
+	const clip = sourceTrack?.clips.find((candidate) => candidate.id === clipId);
+	if (!sourceTrack || !clip || sourceTrack.locked || dragDelta === 0) return tracks;
+
+	const sortedClips = sourceTrack.clips.slice().sort((a, b) => a.startTime - b.startTime);
+	const index = sortedClips.findIndex((candidate) => candidate.id === clipId);
+	if (index === -1) return tracks;
+	const left = sortedClips[index - 1];
+	const right = sortedClips[index + 1];
+	if (!left && !right) return tracks;
+
+	const minimumDuration = 1 / FRAME_RATE;
+	// moving right: left neighbor grows, right neighbor shrinks
+	const leftGrow = left
+		? Math.min(
+				timelineDuration,
+				left.startTime +
+					(!left.frozen && left.sourceDuration
+						? getClipSourceLimitDuration(
+								left,
+								Math.max(0, (left.sourceDuration ?? 0) - (left.sourceStart ?? 0))
+							)
+						: timelineDuration - left.startTime)
+			) -
+			(left.startTime + left.duration)
+		: Number.POSITIVE_INFINITY;
+	const rightShrink = right
+		? right.duration - minimumDuration
+		: timelineDuration - (clip.startTime + clip.duration);
+	// moving left: left neighbor shrinks, right neighbor grows into source
+	const leftShrink = left ? left.duration - minimumDuration : clip.startTime;
+	const rightGrow = right
+		? Math.min(
+				right.assetId && !right.frozen
+					? getClipSourceLimitDuration(right, Math.max(0, right.sourceStart ?? 0))
+					: 0,
+				right.startTime
+			)
+		: Number.POSITIVE_INFINITY;
+
+	const maxRight = Math.min(leftGrow, rightShrink);
+	const maxLeft = Math.min(leftShrink, rightGrow);
+	const d = Math.min(maxRight, Math.max(-maxLeft, dragDelta));
+	if (d === 0) return tracks;
+	const nextClipStart = roundToFrame(clip.startTime + d);
+	const nextRightStart = roundToFrame(clip.startTime + clip.duration + d);
+
+	let changed = false;
+	const nextTracks = tracks.map((track) => {
+		if (track.id !== sourceTrack.id) return track;
+		return {
+			...track,
+			clips: track.clips.map((candidate) => {
+				if (candidate.id === clipId) {
+					changed = true;
+					return { ...candidate, startTime: nextClipStart };
+				}
+				if (left && candidate.id === left.id) {
+					changed = true;
+					const nextLeftDuration = roundToFrame(nextClipStart - left.startTime);
+					return {
+						...candidate,
+						duration: nextLeftDuration,
+						keyframes: trimClipKeyframesEnd(
+							candidate,
+							nextLeftDuration,
+							`${candidate.id}-slide-end-${frameIndex(nextLeftDuration)}`
+						),
+						sourceStart:
+							candidate.frozen === true || candidate.reversed !== true
+								? candidate.sourceStart
+								: roundToFrame(getClipSourceTime(candidate, nextLeftDuration))
+					};
+				}
+				if (right && candidate.id === right.id) {
+					changed = true;
+					const trimmed = nextRightStart - right.startTime;
+					return {
+						...candidate,
+						startTime: nextRightStart,
+						duration: roundToFrame(right.startTime + right.duration - nextRightStart),
+						keyframes: trimClipKeyframesStart(
+							candidate,
+							trimmed,
+							`${candidate.id}-slide-start-${frameIndex(trimmed)}`
+						),
+						sourceStart:
+							candidate.assetId && candidate.frozen !== true && candidate.reversed !== true
+								? roundToFrame(
+										trimmed >= 0
+											? (candidate.sourceStart ?? 0) + getClipSourceOffset(candidate, trimmed)
+											: (candidate.sourceStart ?? 0) - getClipSourceOffset(candidate, -trimmed)
+									)
+								: candidate.sourceStart
+					};
+				}
+				return candidate;
+			})
+		};
+	});
+	return changed ? nextTracks : tracks;
+}
+
 export function rippleDeleteClips(tracks: Track[], clipIds: string[]): Track[] {
 	const selectedIds = new Set(clipIds);
 	let changed = false;
@@ -890,7 +1147,7 @@ export function clampKeyframeValue(property: KeyframeProperty, value: number): n
 		return Math.min(MAX_VISUAL_ROTATION, Math.max(MIN_VISUAL_ROTATION, value));
 	}
 	if (property === 'opacity') return Math.min(100, Math.max(0, value));
-	if (property === 'volume') return Math.min(1, Math.max(0, value));
+	if (property === 'volume') return Math.min(4, Math.max(0, value));
 	if (property === 'speed') return Math.min(MAX_CLIP_SPEED, Math.max(MIN_CLIP_SPEED, value));
 	if (property === 'audioFadeIn' || property === 'audioFadeOut') {
 		return Math.min(5, Math.max(0, value));

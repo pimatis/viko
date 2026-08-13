@@ -130,6 +130,12 @@
 		onAspectSettingsChange = () => {}
 	}: Props = $props();
 
+	// JKL shuttle runs the timeline clock backward (negative playbackRate).
+	// HTMLMediaElement cannot free-run backward, so while shuttling backward every
+	// media layer is switched into the frame-step mode used by reversed clips:
+	// the element stays paused and syncMedia seeks it one frame per clock tick.
+	const steppingBackward = $derived(playbackRate < 0);
+
 	// An adjustment layer applies its effects/grading to every visual layer below
 	// it (in track stacking order) that overlaps its time range. The preview builds
 	// a nested tree of 'band' nodes: each band is a full-frame wrapper whose CSS
@@ -388,7 +394,7 @@
 		if (state.audioFadeOut > 0 && timeUntilEnd < state.audioFadeOut) {
 			fadeFactor = Math.min(fadeFactor, Math.max(0, timeUntilEnd / state.audioFadeOut));
 		}
-		return Math.min(1, Math.max(0, state.volume * fadeFactor));
+		return Math.min(4, Math.max(0, state.volume * fadeFactor));
 	}
 
 	function getLayerDuckingFactor(layer: PlayerLayer): number {
@@ -936,8 +942,8 @@
 													sourceTime={layer.sourceTime}
 													{isPlaying}
 													muted={previewMuted || layer.trackMuted || layer.clip.reversed === true}
-													syncEveryTick={layer.clip.reversed === true}
-													reversed={layer.clip.reversed === true}
+													syncEveryTick={layer.clip.reversed === true || steppingBackward}
+													reversed={layer.clip.reversed === true || steppingBackward}
 													playbackRate={getLayerPlaybackRate(layer)}
 													volume={getLayerEffectiveVolume(layer, visualState)}
 													grade={layer.clip.colorGrade!}
@@ -952,8 +958,8 @@
 													sourceTime={layer.sourceTime}
 													{isPlaying}
 													muted={previewMuted || layer.trackMuted || layer.clip.reversed === true}
-													syncEveryTick={layer.clip.reversed === true}
-													reversed={layer.clip.reversed === true}
+													syncEveryTick={layer.clip.reversed === true || steppingBackward}
+													reversed={layer.clip.reversed === true || steppingBackward}
 													playbackRate={getLayerPlaybackRate(layer)}
 													volume={getLayerEffectiveVolume(layer, visualState)}
 													config={getClipChromaKeyState(layer.clip, layer.clipTime)}
@@ -969,8 +975,8 @@
 														playing: isPlaying,
 														muted: previewMuted || layer.trackMuted || layer.clip.reversed === true,
 														playbackRate: getLayerPlaybackRate(layer),
-														syncEveryTick: layer.clip.reversed === true,
-														reversed: layer.clip.reversed === true
+														syncEveryTick: layer.clip.reversed === true || steppingBackward,
+														reversed: layer.clip.reversed === true || steppingBackward
 													}}
 													use:syncMediaVolume={getLayerEffectiveVolume(layer, visualState)}
 												>
@@ -1164,7 +1170,7 @@
 							class="h-6 min-w-14 border-0 bg-transparent px-1.5 text-[10px] font-medium text-muted-foreground shadow-none hover:text-foreground"
 							aria-label="Playback speed"
 						>
-							<span>{playbackRate}x</span>
+							<span>{Math.abs(playbackRate)}x</span>
 						</Select.Trigger>
 						<Select.Content align="end" side="top">
 							{#each PLAYER_PLAYBACK_RATES as rate (rate)}

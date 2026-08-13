@@ -6,6 +6,7 @@
 	import {
 		IDENTITY_CURVE,
 		LUT_PRESETS,
+		clampFinishValue,
 		clampGradeIntensity,
 		clampWheelHue,
 		clampWheelSaturation,
@@ -26,6 +27,7 @@
 		type ColorWheel as ColorWheelGrade,
 		type CubeLut,
 		type CurveChannel,
+		type FinishFilters,
 		type SecondaryCorrection,
 		type SecondaryPowerWindow
 	} from '$lib/grading';
@@ -53,7 +55,7 @@
 		matching = false
 	}: Props = $props();
 
-	type GradingTab = 'wheels' | 'curves' | 'lut' | 'secondary';
+	type GradingTab = 'wheels' | 'curves' | 'lut' | 'secondary' | 'finish';
 	type WheelKey = 'master' | 'shadows' | 'midtones' | 'highlights';
 
 	let activeTab = $state<GradingTab>('wheels');
@@ -71,7 +73,8 @@
 			{ id: 'wheels', label: 'Wheels' },
 			{ id: 'curves', label: 'Curves' },
 			{ id: 'lut', label: 'LUT' },
-			{ id: 'secondary', label: 'Secondary' }
+			{ id: 'secondary', label: 'Secondary' },
+			{ id: 'finish', label: 'Finish' }
 		];
 		return allowLut ? allTabs : allTabs.filter((tab) => tab.id !== 'lut' && tab.id !== 'secondary');
 	});
@@ -129,6 +132,17 @@
 	function handleIntensityChange(event: Event) {
 		const value = Number((event.currentTarget as HTMLInputElement).value);
 		onGradeChange((current) => ({ ...current, intensity: clampGradeIntensity(value) }));
+	}
+
+	// ----- finish filters (vignette / grain / sharpen / denoise) -----
+
+	function handleFinishSlider(field: keyof FinishFilters, event: Event) {
+		const value = Number((event.currentTarget as HTMLInputElement).value);
+		if (!Number.isFinite(value)) return;
+		onGradeChange((current) => ({
+			...current,
+			finish: { ...current.finish, [field]: clampFinishValue(value) }
+		}));
 	}
 
 	function handleCurvePointsChange(points: ColorCurvePoint[]) {
@@ -495,6 +509,46 @@
 			<p class="text-[9px] text-muted-foreground">
 				Click to add, drag to move, double-click to remove a point.
 			</p>
+		</div>
+	{:else if activeTab === 'finish'}
+		{@const finishRows = [
+			{ field: 'vignette', label: 'Vignette', hint: 'Darken the frame edges' },
+			{ field: 'grain', label: 'Film grain', hint: 'Add organic film noise' },
+			{ field: 'sharpen', label: 'Sharpen', hint: 'Edge contrast via unsharp mask' },
+			{ field: 'denoise', label: 'Denoise', hint: 'Reduce noise with a blur kernel' }
+		] as { field: keyof FinishFilters; label: string; hint: string }[]}
+		<div class="space-y-2">
+			<p class="text-[9px] text-muted-foreground">
+				Spatial last-touch filters. Sharpen and denoise run a real convolution kernel; grain
+				animates per frame, matching the export.
+			</p>
+			{#each finishRows as row (row.field)}
+				{@const rawValue = currentGrade.finish[row.field]}
+				<div>
+					<div class="mb-1 flex items-center justify-between">
+						<div class="flex items-center gap-1.5">
+							<span class="text-[10px] font-medium text-foreground">{row.label}</span>
+						</div>
+						<span class="text-[10px] text-muted-foreground tabular-nums"
+							>{Math.round(rawValue)}%</span
+						>
+					</div>
+					<input
+						type="range"
+						min="0"
+						max="100"
+						step="1"
+						value={rawValue}
+						oninput={(event) => handleFinishSlider(row.field, event)}
+						class="h-1 w-full cursor-pointer accent-primary"
+						aria-label={`${row.label} strength`}
+						title={row.hint}
+					/>
+					<div class="mt-0.5 flex justify-between">
+						<span class="text-[8px] text-muted-foreground/70">{row.hint}</span>
+					</div>
+				</div>
+			{/each}
 		</div>
 	{:else if activeTab === 'lut'}
 		<div class="space-y-1">

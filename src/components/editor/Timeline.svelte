@@ -37,7 +37,10 @@
 		resizeClip,
 		rippleDeleteClips,
 		rippleInsertClips,
+		rollingTrim,
 		roundToFrame,
+		slideClip,
+		slipClip,
 		reconcileClipTransitions,
 		splitClipKeyframes,
 		snapClipEdge,
@@ -171,6 +174,7 @@
 	type ClipTrim = {
 		clipId: string;
 		trackId: string;
+		mode: 'trim' | 'rolling' | 'slip' | 'slide';
 		edge: 'start' | 'end';
 		originClientX: number;
 		originScrollLeft: number;
@@ -274,7 +278,21 @@
 		{ ...trimStartShortcut, ignoreWhenTyping: true, onKeyDown: trimSelectedClipStarts },
 		{ ...trimEndShortcut, ignoreWhenTyping: true, onKeyDown: trimSelectedClipEnds },
 		{ ...markerShortcut, ignoreWhenTyping: true, onKeyDown: addMarkerAtPlayhead },
-		{ ...keyframeShortcut, ignoreWhenTyping: true, onKeyDown: addKeyframesAtPlayhead },
+		{
+			...keyframeShortcut,
+			ignoreWhenTyping: true,
+			// K is the JKL shuttle pause key: while playing (or shuttling) it pauses;
+			// while paused it keeps the original add-keyframes-at-playhead behavior
+			onKeyDown: () => {
+				if (isPlaying || shuttleKey !== null) {
+					stopPlayback();
+					clearShuttle();
+					sound.pause();
+					return;
+				}
+				addKeyframesAtPlayhead();
+			}
+		},
 		{ ...freezeShortcut, ignoreWhenTyping: true, onKeyDown: freezeSelectedClipsAtPlayhead },
 		{ ...reverseShortcut, ignoreWhenTyping: true, onKeyDown: toggleSelectedClipsReversed },
 		{
@@ -294,6 +312,18 @@
 			}
 		},
 		{ ...playShortcut, ignoreWhenTyping: true, onKeyDown: togglePlay },
+		{
+			key: 'j',
+			ignoreWhenTyping: true,
+			onKeyDown: () => handleShuttleKey('back'),
+			onKeyUp: () => handleShuttleKeyUp('back')
+		},
+		{
+			key: 'l',
+			ignoreWhenTyping: true,
+			onKeyDown: () => handleShuttleKey('forward'),
+			onKeyUp: () => handleShuttleKeyUp('forward')
+		},
 		{ key: 'Backspace', shift: true, ignoreWhenTyping: true, onKeyDown: rippleDeleteSelectedClips },
 		{ key: 'Backspace', ignoreWhenTyping: true, onKeyDown: deleteSelectedClips },
 		{ ...deleteShortcut, ignoreWhenTyping: true, onKeyDown: deleteSelectedClips }
@@ -350,7 +380,7 @@
 		commandRequest = null,
 		historyEpoch = 0,
 		onHistoryAvailabilityChange = () => {},
-		playbackRate = 1,
+		playbackRate = $bindable(1),
 		loopEnabled = false,
 		selectedClipId = $bindable(null),
 		rippleMode = false,
@@ -372,6 +402,10 @@
 	let isDraggingPlayhead = $state(false);
 	let playbackFrame: number | null = null;
 	let lastPlaybackTimestamp: number | null = null;
+	// JKL shuttle state: held direction key accelerates through 1x -> 2x -> 4x
+	let shuttleKey = $state<'back' | 'forward' | null>(null);
+	let shuttleLevel = 0;
+	let shuttleRampTimer: ReturnType<typeof setInterval> | null = null;
 	let clipboard = $state<TimelineClipboard | null>(null);
 	let clipboardPanelOpen = $state(false);
 	let clipDrag = $state<ClipDrag | null>(null);
@@ -920,31 +954,48 @@
 
 		if (clipTrim) {
 			autoScrollTimeline(e.clientX, e.clientY);
-			const rawEdgeTime =
-				clipTrim.originalEdgeTime +
+			const deltaSeconds =
 				(e.clientX -
 					clipTrim.originClientX +
 					((scrollContainer?.scrollLeft ?? clipTrim.originScrollLeft) -
 						clipTrim.originScrollLeft)) /
-					pixelsPerSecond;
-			const edgeTime = snappingEnabled
-				? snapClipEdge(
+				pixelsPerSecond;
+			let nextTracks: Track[];
+			if (clipTrim.mode === 'slip') {
+				nextTracks = slipClip(clipTrim.originalTracks, clipTrim.clipId, deltaSeconds);
+			} else if (clipTrim.mode === 'slide') {
+				nextTracks = slideClip(clipTrim.originalTracks, clipTrim.clipId, deltaSeconds, duration);
+			} else {
+				const rawEdgeTime = clipTrim.originalEdgeTime + deltaSeconds;
+				const edgeTime = snappingEnabled
+					? snapClipEdge(
+							clipTrim.originalTracks,
+							clipTrim.clipId,
+							rawEdgeTime,
+							currentTime,
+							duration,
+							SNAP_THRESHOLD_PX / pixelsPerSecond,
+							rulerIntervals.minorInterval
+						)
+					: rawEdgeTime;
+				if (clipTrim.mode === 'rolling') {
+					nextTracks = rollingTrim(
 						clipTrim.originalTracks,
 						clipTrim.clipId,
-						rawEdgeTime,
-						currentTime,
-						duration,
-						SNAP_THRESHOLD_PX / pixelsPerSecond,
-						rulerIntervals.minorInterval
-					)
-				: rawEdgeTime;
-			const nextTracks = resizeClip(
-				clipTrim.originalTracks,
-				clipTrim.clipId,
-				clipTrim.edge,
-				edgeTime,
-				duration
-			);
+						clipTrim.edge,
+						edgeTime - clipTrim.originalEdgeTime,
+						duration
+					);
+				} else {
+					nextTracks = resizeClip(
+						clipTrim.originalTracks,
+						clipTrim.clipId,
+						clipTrim.edge,
+						edgeTime,
+						duration
+					);
+				}
+			}
 			clipTrim.didMove = nextTracks !== clipTrim.originalTracks;
 			tracks = nextTracks;
 			return;
@@ -1067,6 +1118,7 @@
 	function togglePlay() {
 		if (isPlaying) sound.pause();
 		if (!isPlaying) sound.play();
+		if (shuttleKey !== null || shuttleLevel > 0) clearShuttle();
 		if (isPlaying) {
 			stopPlayback();
 			return;
@@ -1075,15 +1127,20 @@
 		startPlayback();
 	}
 
-	function startPlayback() {
+	function startPlayback(direction: 1 | -1 = 1) {
 		if (playbackFrame !== null) return;
 		if (playbackEndPoint <= 0) {
 			isPlaying = false;
 			return;
 		}
-		if (currentTime >= playbackEndPoint || currentTime < playbackStartPoint) {
-			currentTime = playbackStartPoint;
-			onSeek(playbackStartPoint);
+		if (direction > 0) {
+			if (currentTime >= playbackEndPoint || currentTime < playbackStartPoint) {
+				currentTime = playbackStartPoint;
+				onSeek(playbackStartPoint);
+			}
+		} else if (currentTime <= playbackStartPoint || currentTime > playbackEndPoint) {
+			currentTime = playbackEndPoint;
+			onSeek(playbackEndPoint);
 		}
 		isPlaying = true;
 		lastPlaybackTimestamp = null;
@@ -1106,16 +1163,23 @@
 			return;
 		}
 		lastPlaybackTimestamp = timestamp;
-		const nextTime = Math.min(playbackEndPoint, currentTime + (elapsedMs / 1000) * playbackRate);
+		// playbackRate may be negative (JKL shuttle): clamp inside the play range
+		// so backward playback stops at the start instead of running off the clock
+		const nextTime = Math.max(
+			playbackStartPoint,
+			Math.min(playbackEndPoint, currentTime + (elapsedMs / 1000) * playbackRate)
+		);
 		currentTime = nextTime;
 		onSeek(nextTime);
-		if (nextTime < playbackEndPoint) {
+		const reachedBoundary =
+			playbackRate >= 0 ? nextTime >= playbackEndPoint : nextTime <= playbackStartPoint;
+		if (!reachedBoundary) {
 			playbackFrame = requestAnimationFrame(updatePlayback);
 			return;
 		}
 		if (loopEnabled) {
-			currentTime = playbackStartPoint;
-			onSeek(playbackStartPoint);
+			currentTime = playbackRate >= 0 ? playbackStartPoint : playbackEndPoint;
+			onSeek(currentTime);
 			playbackFrame = requestAnimationFrame(updatePlayback);
 			return;
 		}
@@ -1131,6 +1195,56 @@
 		if (playbackFrame !== null) cancelAnimationFrame(playbackFrame);
 		playbackFrame = null;
 		lastPlaybackTimestamp = null;
+	}
+
+	// JKL shuttle (Premiere-style): tap to play a direction, tap again or hold to
+	// accelerate. Releasing the key keeps playback at the current speed; K pauses.
+	const SHUTTLE_RATES = [1, 2, 4] as const;
+
+	function applyShuttle() {
+		// the clock derives direction from the sign of playbackRate
+		const rate = SHUTTLE_RATES[shuttleLevel] ?? 4;
+		playbackRate = shuttleKey === 'back' ? -rate : rate;
+		startPlayback(shuttleKey === 'back' ? -1 : 1);
+	}
+
+	function startShuttleRamp() {
+		if (shuttleRampTimer !== null) return;
+		shuttleRampTimer = setInterval(() => {
+			shuttleLevel = Math.min(SHUTTLE_RATES.length - 1, shuttleLevel + 1);
+			applyShuttle();
+			sound.select();
+		}, 600);
+	}
+
+	function stopShuttleRamp() {
+		if (shuttleRampTimer !== null) clearInterval(shuttleRampTimer);
+		shuttleRampTimer = null;
+	}
+
+	function clearShuttle() {
+		shuttleKey = null;
+		shuttleLevel = 0;
+		stopShuttleRamp();
+		playbackRate = 1;
+	}
+
+	function handleShuttleKey(direction: 'back' | 'forward') {
+		if (shuttleKey === direction) {
+			shuttleLevel = Math.min(SHUTTLE_RATES.length - 1, shuttleLevel + 1);
+		} else {
+			shuttleKey = direction;
+			shuttleLevel = 0;
+		}
+		applyShuttle();
+		startShuttleRamp();
+		sound.select();
+	}
+
+	function handleShuttleKeyUp(direction: 'back' | 'forward') {
+		if (shuttleKey !== direction) return;
+		// release keeps playing at the current speed, just stops the ramp
+		stopShuttleRamp();
 	}
 
 	function skipBack() {
@@ -1435,9 +1549,19 @@
 			splitClipAtPlayhead();
 			return;
 		}
+		if (activeTool === 'slip' || activeTool === 'slide') {
+			startClipTrim(e, track, clip, 'end', activeTool);
+			return;
+		}
 
 		if (!e.ctrlKey && !e.metaKey && !selectedClipIds.includes(clip.id)) {
 			setClipSelection([clip.id]);
+			// bring the playhead onto a newly selected clip so its grading and effects
+			// are visible in the preview while the user edits its properties
+			if (currentTime < clip.startTime || currentTime >= clip.startTime + clip.duration) {
+				currentTime = clip.startTime;
+				onSeek(clip.startTime);
+			}
 		}
 		activeTrackId = track.id;
 
@@ -1455,7 +1579,13 @@
 		};
 	}
 
-	function startClipTrim(event: MouseEvent, track: Track, clip: Clip, edge: ClipTrim['edge']) {
+	function startClipTrim(
+		event: MouseEvent,
+		track: Track,
+		clip: Clip,
+		edge: ClipTrim['edge'],
+		mode: ClipTrim['mode'] = 'trim'
+	) {
 		if (event.button !== 0 || track.locked || !scrollContainer) return;
 		event.preventDefault();
 		event.stopPropagation();
@@ -1465,6 +1595,7 @@
 		clipTrim = {
 			clipId: clip.id,
 			trackId: track.id,
+			mode,
 			edge,
 			originClientX: event.clientX,
 			originScrollLeft: scrollContainer.scrollLeft,
@@ -2744,6 +2875,10 @@
 												activeTool === 'hand' && 'cursor-grab',
 												activeTool === 'razor' && 'cursor-crosshair',
 												activeTool === 'text' && 'cursor-text',
+												(activeTool === 'slip' ||
+													activeTool === 'rolling' ||
+													activeTool === 'slide') &&
+													'cursor-ew-resize',
 												colors.bg,
 												colors.border,
 												clip.effects?.length && 'ring-1 ring-primary/50',
@@ -2777,7 +2912,14 @@
 													isClipSelected && 'opacity-100',
 													track.locked && 'cursor-not-allowed'
 												)}
-												onmousedown={(event) => startClipTrim(event, track, clip, 'start')}
+												onmousedown={(event) =>
+													startClipTrim(
+														event,
+														track,
+														clip,
+														'start',
+														activeTool === 'rolling' ? 'rolling' : 'trim'
+													)}
 												title="Trim start"
 											></span>
 											{#if clipWidth > 16 || clip.textStyle}
@@ -2853,7 +2995,14 @@
 													isClipSelected && 'opacity-100',
 													track.locked && 'cursor-not-allowed'
 												)}
-												onmousedown={(event) => startClipTrim(event, track, clip, 'end')}
+												onmousedown={(event) =>
+													startClipTrim(
+														event,
+														track,
+														clip,
+														'end',
+														activeTool === 'rolling' ? 'rolling' : 'trim'
+													)}
 												title="Trim end"
 											></span>
 											{#if isClipSelected && !track.locked && clipWidth > 50}

@@ -804,7 +804,8 @@ function getGradedCanvas(
 	if (isChromaKeyActive(clip.clip.chromaKey)) {
 		applyChromaKey(imageData, getClipChromaKeyState(clip.clip, localTime));
 	}
-	applyColorGrade(imageData, grade);
+	// seed by the clip-local frame so film grain is deterministic per frame
+	applyColorGrade(imageData, grade, Math.round(localTime * FRAME_RATE));
 	context.putImageData(imageData, 0, 0);
 	clip.gradedTime = localTime;
 	return canvas;
@@ -989,7 +990,7 @@ function applyAdjustmentLayer(
 	const localTime = currentTime - clip.startTime;
 	if (localTime < 0 || localTime > clip.duration) return;
 
-	const { transform, opacity, colorAdjust } = getClipVisualState(clip.clip, localTime);
+	const { opacity, colorAdjust } = getClipVisualState(clip.clip, localTime);
 	const effectState = getEffectVisualState(
 		clip.clip.effects ?? [],
 		localTime,
@@ -1020,7 +1021,7 @@ function applyAdjustmentLayer(
 	// exact per-pixel grading first (curves, wheels, luts, secondary qualifiers)
 	if (grade && !isNeutralGrade(grade)) {
 		const imageData = offscreenContext.getImageData(0, 0, canvasWidth, canvasHeight);
-		applyColorGrade(imageData, grade);
+		applyColorGrade(imageData, grade, Math.round(currentTime * FRAME_RATE));
 		offscreenContext.putImageData(imageData, 0, 0);
 	}
 

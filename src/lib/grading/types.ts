@@ -74,6 +74,19 @@ export type CubeLutRef = {
 	source: string;
 };
 
+// spatial "finish" filters: the last-touch effects applied after the color pass.
+// every value is a 0..100 strength.
+export type FinishFilters = {
+	/** radial darkening toward the frame edges */
+	vignette: number;
+	/** monochrome-ish per-pixel noise, animated per frame */
+	grain: number;
+	/** unsharp-mask edge contrast (convolution kernel) */
+	sharpen: number;
+	/** blur-based noise reduction (convolution kernel) */
+	denoise: number;
+};
+
 export type ColorGrade = {
 	shadows: ColorWheel;
 	midtones: ColorWheel;
@@ -83,5 +96,6 @@ export type ColorGrade = {
 	lutId: string | null;
 	customLut: CubeLutRef | null;
 	secondary: SecondaryCorrection;
+	finish: FinishFilters;
 	intensity: number;
 };

@@ -1,14 +1,22 @@
 import {
+	clampFinishFilters,
 	clampGradeIntensity,
 	clampWheelHue,
 	clampWheelSaturation,
 	clampSecondaryPercent,
+	isFinishActive,
 	isNeutralWheel,
 	sampleCurve
 } from './defaults';
 import { getLutPreset } from './luts';
 import { applyCubeLut, ensureCubeLutRegistered } from './cube';
-import type { ColorGrade, ColorWheel, SecondaryCorrection, SecondaryPowerWindow } from './types';
+import type {
+	ColorGrade,
+	ColorWheel,
+	FinishFilters,
+	SecondaryCorrection,
+	SecondaryPowerWindow
+} from './types';
 
 const PIXEL_TABLE_SAMPLES = 256;
 
@@ -176,6 +184,185 @@ function windowWeight(window: SecondaryPowerWindow, nx: number, ny: number): num
 	return 1 - t * t * (3 - 2 * t);
 }
 
+// ---------- finish filters (vignette / grain / sharpen / denoise) ----------
+//
+// these are the spatial "last touch" filters applied after the color pass.
+// sharpen and denoise run an actual 3x3 convolution kernel (implemented as two
+// separable 1x3 passes), vignette is a radial window and grain is deterministic
+// per-pixel noise seeded by the frame so it shimmers across playback.
+
+// deterministic integer hash -> [0, 1)
+function hash01(x: number, y: number, seed: number): number {
+	let h = (x * 374761393 + y * 668265263 + seed * 2246822519) | 0;
+	h = Math.imul(h ^ (h >>> 13), 1274126177);
+	h ^= h >>> 16;
+	return (h >>> 0) / 4294967296;
+}
+
+function smoothstep(from: number, to: number, value: number): number {
+	const t = Math.min(1, Math.max(0, (value - from) / Math.max(1e-6, to - from)));
+	return t * t * (3 - 2 * t);
+}
+
+// module-level scratch buffers reused across calls (calls are synchronous and
+// never re-entrant, so sharing is safe). three buffers: the untouched original,
+// the blurred copy and a horizontal-pass temp for the separable blur.
+let spatialScratches: Float32Array[] | null = null;
+
+function getSpatialScratches(size: number): [Float32Array, Float32Array, Float32Array] {
+	if (!spatialScratches)
+		spatialScratches = [new Float32Array(0), new Float32Array(0), new Float32Array(0)];
+	if (spatialScratches[0].length < size) {
+		for (let index = 0; index < 3; index += 1) spatialScratches[index] = new Float32Array(size);
+	}
+	return [spatialScratches[0], spatialScratches[1], spatialScratches[2]];
+}
+
+// separable 1x3 binomial blur with edge clamping (replicate). reads `src` into
+// `temp` horizontally, then back into `src` vertically, so `src` holds the blur.
+function blur3(src: Float32Array, temp: Float32Array, width: number, height: number): void {
+	const channels = 3;
+	for (let y = 0; y < height; y += 1) {
+		const rowBase = y * width * channels;
+		for (let x = 0; x < width; x += 1) {
+			const center = rowBase + x * channels;
+			const left = rowBase + (x > 0 ? x - 1 : 0) * channels;
+			const right = rowBase + (x < width - 1 ? x + 1 : width - 1) * channels;
+			temp[center] = (src[left] + src[center] * 2 + src[right]) * 0.25;
+			temp[center + 1] = (src[left + 1] + src[center + 1] * 2 + src[right + 1]) * 0.25;
+			temp[center + 2] = (src[left + 2] + src[center + 2] * 2 + src[right + 2]) * 0.25;
+		}
+	}
+	for (let y = 0; y < height; y += 1) {
+		const topBase = (y > 0 ? y - 1 : 0) * width * channels;
+		const centerBase = y * width * channels;
+		const bottomBase = (y < height - 1 ? y + 1 : height - 1) * width * channels;
+		for (let x = 0; x < width; x += 1) {
+			const center = centerBase + x * channels;
+			src[center] =
+				(temp[topBase + x * channels] + temp[center] * 2 + temp[bottomBase + x * channels]) * 0.25;
+			src[center + 1] =
+				(temp[topBase + x * channels + 1] +
+					temp[center + 1] * 2 +
+					temp[bottomBase + x * channels + 1]) *
+				0.25;
+			src[center + 2] =
+				(temp[topBase + x * channels + 2] +
+					temp[center + 2] * 2 +
+					temp[bottomBase + x * channels + 2]) *
+				0.25;
+		}
+	}
+}
+
+// denoise = blend toward the blurred image; sharpen = unsharp mask (add the
+// high-pass difference back). both share the same convolution kernel.
+function applySpatialKernels(
+	data: Uint8ClampedArray,
+	finish: FinishFilters,
+	width: number,
+	height: number
+): void {
+	const pixelCount = width * height;
+	if (pixelCount <= 0) return;
+	const size = pixelCount * 3;
+	const [original, blurred, temp] = getSpatialScratches(size);
+	// the source is an RGBA buffer but the scratch planes are RGB: copy the
+	// three color channels per pixel (reading data[index] linearly would mix
+	// alpha into the color planes every fourth sample)
+	for (let pixel = 0; pixel < pixelCount; pixel += 1) {
+		const dataBase = pixel * 4;
+		const base = pixel * 3;
+		original[base] = data[dataBase] / 255;
+		original[base + 1] = data[dataBase + 1] / 255;
+		original[base + 2] = data[dataBase + 2] / 255;
+		blurred[base] = original[base];
+		blurred[base + 1] = original[base + 1];
+		blurred[base + 2] = original[base + 2];
+	}
+	blur3(blurred, temp, width, height);
+
+	const denoiseAmount = (finish.denoise / 100) * 0.85;
+	const sharpenAmount = (finish.sharpen / 100) * 1.15;
+	for (let offset = 0; offset < data.length; offset += 4) {
+		const base = (offset / 4) * 3;
+		for (let channel = 0; channel < 3; channel += 1) {
+			const o = original[base + channel];
+			const b = blurred[base + channel];
+			let value = o;
+			if (denoiseAmount > 0) value = o + (b - o) * denoiseAmount;
+			if (sharpenAmount > 0) value = value + (o - b) * sharpenAmount;
+			data[offset + channel] = Math.round(clamp01(value) * 255);
+		}
+	}
+}
+
+function applyVignette(
+	data: Uint8ClampedArray,
+	amount: number,
+	width: number,
+	height: number
+): void {
+	if (amount <= 0) return;
+	const strength = (amount / 100) * 0.9;
+	for (let y = 0; y < height; y += 1) {
+		const ny = y / Math.max(1, height - 1) - 0.5;
+		for (let x = 0; x < width; x += 1) {
+			const nx = x / Math.max(1, width - 1) - 0.5;
+			// normalize the corner distance so r=1 lands at the frame corners
+			const r = Math.min(1.05, Math.sqrt(nx * nx + ny * ny) / Math.SQRT1_2);
+			const window = smoothstep(0.35, 1, r);
+			const factor = 1 - strength * window;
+			const offset = (y * width + x) * 4;
+			data[offset] = Math.round(clamp01((data[offset] / 255) * factor) * 255);
+			data[offset + 1] = Math.round(clamp01((data[offset + 1] / 255) * factor) * 255);
+			data[offset + 2] = Math.round(clamp01((data[offset + 2] / 255) * factor) * 255);
+		}
+	}
+}
+
+function applyGrain(
+	data: Uint8ClampedArray,
+	amount: number,
+	width: number,
+	height: number,
+	seed: number
+): void {
+	if (amount <= 0) return;
+	// peak luma displacement at 100% strength; grain stays subtle like film stock
+	const amplitude = (amount / 100) * 0.055;
+	const frameSeed = Math.round(seed * 1e3) % 1_000_000_000;
+	for (let y = 0; y < height; y += 1) {
+		for (let x = 0; x < width; x += 1) {
+			const offset = (y * width + x) * 4;
+			const mono = hash01(x, y, frameSeed) * 2 - 1;
+			const chromaA = hash01(x, y, frameSeed + 7919) * 2 - 1;
+			const chromaB = hash01(x, y, frameSeed + 104729) * 2 - 1;
+			const deltaR = amplitude * (mono * 0.8 + chromaA * 0.2);
+			const deltaG = amplitude * (mono * 0.8 + chromaB * 0.2);
+			const deltaB = amplitude * (mono * 0.8 - (chromaA + chromaB) * 0.1);
+			data[offset] = Math.round(clamp01(data[offset] / 255 + deltaR) * 255);
+			data[offset + 1] = Math.round(clamp01(data[offset + 1] / 255 + deltaG) * 255);
+			data[offset + 2] = Math.round(clamp01(data[offset + 2] / 255 + deltaB) * 255);
+		}
+	}
+}
+
+// apply the spatial finish pass on top of the already-graded rgba buffer
+function applyFinishFilters(imageData: ImageData, finish: FinishFilters, seed: number): void {
+	if (!isFinishActive(finish)) return;
+	const safe = clampFinishFilters(finish);
+	const data = imageData.data;
+	const width = imageData.width;
+	const height = imageData.height;
+
+	// order matches Resolve's finishing chain: clean the noise first, then
+	// sharpen what remains, and finally dress the frame with vignette + grain
+	applySpatialKernels(data, safe, width, height);
+	applyVignette(data, safe.vignette, width, height);
+	applyGrain(data, safe.grain, width, height, seed);
+}
+
 function applySecondary(imageData: ImageData, secondary: SecondaryCorrection): void {
 	const amount = clampSecondaryPercent(secondary.amount, 100) / 100;
 	if (amount <= 0) return;
@@ -243,11 +430,26 @@ function applySecondary(imageData: ImageData, secondary: SecondaryCorrection): v
 
 // apply exact color grading math to an rgba buffer
 // this is the renderer used by the export pipeline; the player preview
-// approximates luma-keyed wheels but shares the same data model
-export function applyColorGrade(imageData: ImageData, grade: ColorGrade): void {
+// approximates luma-keyed wheels but shares the same data model.
+// `seed` animates the film grain so consecutive frames get fresh noise while
+// remaining deterministic (same frame index => same grain).
+export function applyColorGrade(imageData: ImageData, grade: ColorGrade, seed = 0): void {
 	const amount = clampGradeIntensity(grade.intensity) / 100;
-	if (amount <= 0) return;
+	const finish = grade.finish ?? clampFinishFilters(undefined);
+	if (amount <= 0 && !isFinishActive(finish)) return;
 	const data = imageData.data;
+	if (amount > 0) {
+		applyColorGradeCore(imageData, grade, amount, data);
+	}
+	applyFinishFilters(imageData, finish, seed);
+}
+
+function applyColorGradeCore(
+	imageData: ImageData,
+	grade: ColorGrade,
+	amount: number,
+	data: Uint8ClampedArray
+): void {
 	const lut = getLutPreset(grade.lutId ?? '');
 	const cubeLut = ensureCubeLutRegistered(grade.customLut);
 	const redTable = sampleCurve(grade.curves.red, PIXEL_TABLE_SAMPLES);

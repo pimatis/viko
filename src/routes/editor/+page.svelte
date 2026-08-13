@@ -36,6 +36,7 @@
 	import { STICKER_PRESETS, type EditorResource, type MediaAsset } from '$lib/editor/sidebar';
 	import { inspectMediaAsset } from '$lib/editor/sidebar';
 	import { clampDuckAmountDb } from '$lib/audio/ducking';
+	import { normalizeClipAudio } from '$lib/audio/normalize';
 	import { TEXT_PRESETS, type TextStyle } from '$lib/editor/text';
 	import {
 		buildCaptionClips,
@@ -73,6 +74,9 @@
 		Scissors,
 		Hand,
 		Type,
+		AlignHorizontalDistributeCenter,
+		BetweenHorizontalStart,
+		ArrowLeftRight,
 		Magnet,
 		Workflow,
 		Captions,
@@ -132,6 +136,7 @@
 	} from '$lib/editor/timeline';
 	import {
 		clampCurvePoints,
+		clampFinishFilters,
 		clampGradeIntensity,
 		clampSecondaryCorrection,
 		clampSecondaryPercent,
@@ -148,6 +153,7 @@
 		type ColorGrade,
 		type ColorWheel,
 		type CubeLutRef,
+		type FinishFilters,
 		type SecondaryCorrection,
 		type SecondaryPowerWindow
 	} from '$lib/grading';
@@ -395,6 +401,15 @@
 			mediaAssets.some((asset) => asset.id === selectedClip.assetId && asset.kind === 'audio')
 		)
 	);
+	const selectedClipHasAudio = $derived(
+		Boolean(
+			selectedClip?.assetId &&
+			mediaAssets.some(
+				(asset) =>
+					asset.id === selectedClip?.assetId && (asset.kind === 'audio' || asset.kind === 'video')
+			)
+		)
+	);
 
 	const MIN_TIMELINE_DURATION = 30;
 	const TIMELINE_TAIL_DURATION = 30;
@@ -428,7 +443,10 @@
 		{ id: 'select', label: 'Selection tool', icon: MousePointer2 },
 		{ id: 'razor', label: 'Razor tool', icon: Scissors },
 		{ id: 'hand', label: 'Hand tool', icon: Hand },
-		{ id: 'text', label: 'Text tool', icon: Type }
+		{ id: 'text', label: 'Text tool', icon: Type },
+		{ id: 'slip', label: 'Slip tool', icon: AlignHorizontalDistributeCenter },
+		{ id: 'rolling', label: 'Rolling edit tool', icon: BetweenHorizontalStart },
+		{ id: 'slide', label: 'Slide tool', icon: ArrowLeftRight }
 	];
 
 	const stickerIconBySymbol: Record<string, typeof History> = {
@@ -1221,6 +1239,16 @@
 		}
 	}
 
+	function sanitizeFinish(value: unknown): FinishFilters {
+		if (!isRecord(value)) return { vignette: 0, grain: 0, sharpen: 0, denoise: 0 };
+		return clampFinishFilters({
+			vignette: typeof value.vignette === 'number' ? value.vignette : 0,
+			grain: typeof value.grain === 'number' ? value.grain : 0,
+			sharpen: typeof value.sharpen === 'number' ? value.sharpen : 0,
+			denoise: typeof value.denoise === 'number' ? value.denoise : 0
+		});
+	}
+
 	function sanitizeColorGrade(value: unknown): ColorGrade | undefined {
 		if (!isRecord(value)) return undefined;
 		const identity = [...IDENTITY_CURVE];
@@ -1241,6 +1269,7 @@
 			lutId: typeof value.lutId === 'string' && isLutPresetId(value.lutId) ? value.lutId : null,
 			customLut: sanitizeCubeLut(value.customLut),
 			secondary: sanitizeSecondary(value.secondary),
+			finish: sanitizeFinish(value.finish),
 			intensity: typeof value.intensity === 'number' ? clampGradeIntensity(value.intensity) : 100
 		};
 	}
@@ -1389,7 +1418,7 @@
 					? value.speed
 					: undefined,
 			volume:
-				typeof value.volume === 'number' && value.volume >= 0 && value.volume <= 1
+				typeof value.volume === 'number' && value.volume >= 0 && value.volume <= 4
 					? value.volume
 					: undefined,
 			audioFadeIn:
@@ -1976,6 +2005,36 @@
 		};
 	}
 
+	let normalizing = $state(false);
+
+	async function handleNormalizeAudio(clipId: string) {
+		const clip = tracks
+			.flatMap((track) => track.clips)
+			.find((candidate) => candidate.id === clipId);
+		const asset = clip?.assetId
+			? mediaAssets.find((candidate) => candidate.id === clip?.assetId)
+			: null;
+		if (!clip || !asset) return;
+		normalizing = true;
+		try {
+			const volume = await normalizeClipAudio(clip, asset);
+			if (volume === null) {
+				sound.error();
+				return;
+			}
+			sound.success();
+			// route through the Timeline request pipeline so the normalization lands
+			// in the same undo/redo history as other one-shot clip edits
+			clipPropertyChangeRequest = {
+				id: createEntityId('clip-normalize'),
+				clipId,
+				updater: (currentClip) => ({ ...currentClip, volume })
+			};
+		} finally {
+			normalizing = false;
+		}
+	}
+
 	function handleClipPropertyChange(clipId: string, updater: (clip: Clip) => Clip) {
 		const pending = pendingPropertyChange;
 		if (pending && pending.clipId !== clipId) flushClipPropertyChange();
@@ -2258,6 +2317,9 @@
 					{matchSources}
 					onMatchColor={handleMatchColor}
 					matching={matchingClipId === selectedClipId}
+					canNormalizeAudio={selectedClipHasAudio}
+					{normalizing}
+					onNormalizeAudio={handleNormalizeAudio}
 				/>
 			</div>
 		{/if}
@@ -2280,7 +2342,7 @@
 		{visualUpdateRequest}
 		{commandRequest}
 		{historyEpoch}
-		{playbackRate}
+		bind:playbackRate
 		{loopEnabled}
 		{mediaAssets}
 		onAddKeyframes={handleAddKeyframes}

@@ -1,4 +1,4 @@
-export type EditorTool = 'select' | 'razor' | 'hand' | 'text';
+export type EditorTool = 'select' | 'razor' | 'hand' | 'text' | 'slip' | 'rolling' | 'slide';
 
 export const MIN_TIMELINE_ZOOM = 10;
 export const MAX_TIMELINE_ZOOM = 200;

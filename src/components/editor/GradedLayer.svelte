@@ -3,7 +3,7 @@
 	import { syncMedia, syncMediaVolume } from '$lib/editor/mediaSync';
 	import { applyColorGrade, type ColorGrade } from '$lib/grading';
 	import { applyChromaKey } from '$lib/chroma';
-	import type { ChromaKeyState } from '$lib/editor/timeline';
+	import { FRAME_RATE, type ChromaKeyState } from '$lib/editor/timeline';
 
 	type Props = {
 		src: string;
@@ -96,7 +96,9 @@
 		if (chromaConfig) {
 			applyChromaKey(imageData, chromaConfig);
 		}
-		applyColorGrade(imageData, grade);
+		// seed by the source frame so film grain animates during playback and stays
+		// deterministic across redraws of the same frame
+		applyColorGrade(imageData, grade, Math.round(sourceTime * FRAME_RATE));
 		canvasContext.putImageData(imageData, 0, 0);
 		lastDrawTime = Date.now();
 	}

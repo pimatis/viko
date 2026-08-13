@@ -119,13 +119,70 @@ export const syncMedia: Action<HTMLMediaElement, MediaSyncState> = (node, state)
 };
 
 // clamp and apply the preview volume without touching the shared clock
+let boostContext: AudioContext | null = null;
+
+function getBoostContext(): AudioContext {
+	if (!boostContext) boostContext = new AudioContext();
+	return boostContext;
+}
+
+// clamp and apply the preview volume without touching the shared clock.
+// HTMLMediaElement volume caps at 1, so gains above 1 (audio normalization
+// boost) are routed through a shared AudioContext gain node; the element's own
+// volume stays neutral while it is in the graph. Volumes within [0,1] keep the
+// plain element path so ordinary playback never depends on a WebAudio context.
 export const syncMediaVolume: Action<HTMLMediaElement, number> = (node, volume) => {
+	let boost: { source: MediaElementAudioSourceNode; gain: GainNode; context: AudioContext } | null =
+		null;
+
+	function ensureBoost(): typeof boost {
+		if (boost) return boost;
+		try {
+			const context = getBoostContext();
+			const source = context.createMediaElementSource(node);
+			const gain = context.createGain();
+			source.connect(gain).connect(context.destination);
+			// keep the element neutral once it is routed through the graph
+			node.volume = 1;
+			boost = { source, gain, context };
+		} catch {
+			boost = null;
+		}
+		return boost;
+	}
+
 	function applyVolume(nextVolume: number) {
-		const safeVolume = Math.min(1, Math.max(0, Number.isFinite(nextVolume) ? nextVolume : 1));
-		if (node.volume === safeVolume) return;
-		node.volume = safeVolume;
+		const safeVolume = Math.min(4, Math.max(0, Number.isFinite(nextVolume) ? nextVolume : 1));
+		if (safeVolume <= 1 && !boost) {
+			if (node.volume === safeVolume) return;
+			node.volume = safeVolume;
+			return;
+		}
+		const graph = ensureBoost();
+		if (!graph) {
+			// could not create a graph: fall back to the capped element volume
+			if (node.volume === safeVolume) return;
+			node.volume = safeVolume;
+			return;
+		}
+		graph.gain.gain.value = safeVolume;
+		if (safeVolume > 0 && graph.context.state === 'suspended') {
+			void graph.context.resume().catch(() => {});
+		}
 	}
 
 	applyVolume(volume);
-	return { update: applyVolume };
+	return {
+		update: applyVolume,
+		destroy() {
+			if (!boost) return;
+			try {
+				boost.gain.disconnect();
+				boost.source.disconnect();
+			} catch {
+				// element already gone
+			}
+			boost = null;
+		}
+	};
 };

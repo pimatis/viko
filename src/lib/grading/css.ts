@@ -4,6 +4,7 @@ import {
 	MIDTONE_BAND_WEIGHT,
 	SHADOW_BAND_WEIGHT,
 	hasActiveCurves,
+	isFinishActive,
 	isNeutralGrade,
 	isNeutralWheel,
 	sampleCurve
@@ -51,7 +52,13 @@ import { isSecondaryActive } from './defaults';
 
 export function isGradeCssExpressible(grade: ColorGrade | undefined): boolean {
 	if (!grade) return true;
-	return grade.customLut === null && !isSecondaryActive(grade.secondary);
+	return (
+		grade.customLut === null &&
+		!isSecondaryActive(grade.secondary) &&
+		// spatial finish filters (vignette/grain/sharpen/denoise) need a
+		// convolution kernel, so they force the exact canvas rendering pass
+		!isFinishActive(grade.finish)
+	);
 }
 
 // build the deterministic css filter used by the player preview

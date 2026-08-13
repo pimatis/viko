@@ -13,4 +13,5 @@ export type ShortcutBinding = ShortcutSpec & {
 	ignoreWhenTyping?: boolean;
 	enabled?: () => boolean;
 	onKeyDown: (event: KeyboardEvent) => void;
+	onKeyUp?: (event: KeyboardEvent) => void;
 };

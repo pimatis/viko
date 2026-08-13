@@ -3,11 +3,19 @@ import type {
 	ColorCurves,
 	ColorGrade,
 	ColorWheel,
+	FinishFilters,
 	SecondaryCorrection,
 	SecondaryPowerWindow
 } from './types';
 
 export const DEFAULT_COLOR_WHEEL: ColorWheel = { hue: 0, saturation: 0, strength: 0 };
+
+export const DEFAULT_FINISH_FILTERS: FinishFilters = {
+	vignette: 0,
+	grain: 0,
+	sharpen: 0,
+	denoise: 0
+};
 
 export const IDENTITY_CURVE: ColorCurvePoint[] = [
 	{ x: 0, y: 0 },
@@ -62,6 +70,7 @@ export const DEFAULT_COLOR_GRADE: ColorGrade = {
 	lutId: null,
 	customLut: null,
 	secondary: { ...DEFAULT_SECONDARY_CORRECTION },
+	finish: { ...DEFAULT_FINISH_FILTERS },
 	intensity: 100
 };
 
@@ -91,6 +100,25 @@ export function clampWheelStrength(strength: number): number {
 export function clampGradeIntensity(intensity: number): number {
 	if (!Number.isFinite(intensity)) return DEFAULT_COLOR_GRADE.intensity;
 	return Math.min(100, Math.max(0, intensity));
+}
+
+export function clampFinishValue(value: number | undefined): number {
+	if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
+	return Math.min(100, Math.max(0, value));
+}
+
+export function clampFinishFilters(value: Partial<FinishFilters> | undefined): FinishFilters {
+	return {
+		vignette: clampFinishValue(value?.vignette),
+		grain: clampFinishValue(value?.grain),
+		sharpen: clampFinishValue(value?.sharpen),
+		denoise: clampFinishValue(value?.denoise)
+	};
+}
+
+export function isFinishActive(finish: FinishFilters | undefined): boolean {
+	if (!finish) return false;
+	return finish.vignette > 0 || finish.grain > 0 || finish.sharpen > 0 || finish.denoise > 0;
 }
 
 export function clampSecondaryHue(hue: number): number {
@@ -204,6 +232,7 @@ export function isNeutralGrade(grade: ColorGrade): boolean {
 		grade.lutId === null &&
 		grade.customLut === null &&
 		!isSecondaryActive(grade.secondary) &&
+		!isFinishActive(grade.finish) &&
 		grade.intensity === 0 &&
 		isNeutralWheel(grade.master) &&
 		isNeutralWheel(grade.shadows) &&
@@ -231,6 +260,7 @@ export function cloneColorGrade(grade: ColorGrade): ColorGrade {
 			...grade.secondary,
 			window: { ...grade.secondary.window }
 		},
+		finish: { ...grade.finish },
 		intensity: grade.intensity
 	};
 }

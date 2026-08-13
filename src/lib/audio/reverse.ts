@@ -39,7 +39,7 @@ function getContext(): AudioContext {
 }
 
 function clampVolume(value: number): number {
-	return Math.min(1, Math.max(0, Number.isFinite(value) ? value : 1));
+	return Math.min(4, Math.max(0, Number.isFinite(value) ? value : 1));
 }
 
 function clampBufferOffset(value: number, duration: number): number {

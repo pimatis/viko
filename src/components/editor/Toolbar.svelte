@@ -14,7 +14,10 @@
 		Workflow,
 		ArrowRightToLine,
 		ArrowLeftToLine,
-		X
+		X,
+		AlignHorizontalDistributeCenter,
+		BetweenHorizontalStart,
+		ArrowLeftRight
 	} from '@lucide/svelte';
 	import { sound } from '$lib/sound';
 
@@ -53,7 +56,10 @@
 		{ id: 'select', label: 'Selection tool', shortcut: 'V', icon: MousePointer2 },
 		{ id: 'razor', label: 'Razor tool', shortcut: 'B', icon: Scissors },
 		{ id: 'hand', label: 'Hand tool', shortcut: 'H', icon: Hand },
-		{ id: 'text', label: 'Text tool', shortcut: 'T', icon: Type }
+		{ id: 'text', label: 'Text tool', shortcut: 'T', icon: Type },
+		{ id: 'slip', label: 'Slip tool', shortcut: 'Y', icon: AlignHorizontalDistributeCenter },
+		{ id: 'rolling', label: 'Rolling edit tool', shortcut: 'N', icon: BetweenHorizontalStart },
+		{ id: 'slide', label: 'Slide tool', shortcut: 'U', icon: ArrowLeftRight }
 	];
 
 	function setTool(tool: EditorTool) {

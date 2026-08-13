@@ -5,12 +5,14 @@ export type {
 	CurveChannel,
 	LUTPreset,
 	ColorGrade,
+	FinishFilters,
 	SecondaryCorrection,
 	SecondaryPowerWindow,
 	CubeLutRef
 } from './types';
 export {
 	DEFAULT_COLOR_WHEEL,
+	DEFAULT_FINISH_FILTERS,
 	IDENTITY_CURVE,
 	DEFAULT_COLOR_CURVES,
 	DEFAULT_COLOR_GRADE,
@@ -24,6 +26,9 @@ export {
 	clampWheelSaturation,
 	clampWheelStrength,
 	clampGradeIntensity,
+	clampFinishValue,
+	clampFinishFilters,
+	isFinishActive,
 	clampSecondaryHue,
 	clampSecondaryRange,
 	clampSecondaryPercent,

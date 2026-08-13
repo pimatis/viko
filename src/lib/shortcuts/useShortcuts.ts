@@ -13,19 +13,35 @@ export function isTypingTarget(target: EventTarget | null): boolean {
 }
 
 export const useShortcuts: Action<HTMLElement, ShortcutBinding[]> = (node, bindings = []) => {
+	function isBindingEnabled(binding: ShortcutBinding, event: KeyboardEvent): boolean {
+		if (!matchesShortcut(event, binding)) return false;
+		if (binding.enabled && !binding.enabled()) return false;
+		if (binding.ignoreWhenTyping && isTypingTarget(event.target)) return false;
+		return true;
+	}
+
 	function handleKeydown(event: KeyboardEvent) {
 		if (event.defaultPrevented) return;
 		for (const binding of bindings) {
-			if (!matchesShortcut(event, binding)) continue;
-			if (binding.enabled && !binding.enabled()) continue;
-			if (binding.ignoreWhenTyping && isTypingTarget(event.target)) continue;
+			if (!isBindingEnabled(binding, event)) continue;
 			event.preventDefault();
 			binding.onKeyDown(event);
 			return;
 		}
 	}
 
+	function handleKeyup(event: KeyboardEvent) {
+		if (event.defaultPrevented) return;
+		for (const binding of bindings) {
+			if (!binding.onKeyUp) continue;
+			if (!isBindingEnabled(binding, event)) continue;
+			binding.onKeyUp(event);
+			return;
+		}
+	}
+
 	window.addEventListener('keydown', handleKeydown);
+	window.addEventListener('keyup', handleKeyup);
 
 	return {
 		update(nextBindings: ShortcutBinding[]) {
@@ -33,6 +49,7 @@ export const useShortcuts: Action<HTMLElement, ShortcutBinding[]> = (node, bindi
 		},
 		destroy() {
 			window.removeEventListener('keydown', handleKeydown);
+			window.removeEventListener('keyup', handleKeyup);
 		}
 	};
 };

@@ -104,7 +104,7 @@ function computeEffectiveVolume(clip: Clip, clipTime: number): number {
 	if (state.audioFadeOut > 0 && timeUntilEnd < state.audioFadeOut) {
 		fadeFactor = Math.min(fadeFactor, Math.max(0, timeUntilEnd / state.audioFadeOut));
 	}
-	return Math.min(1, Math.max(0, state.volume * fadeFactor));
+	return Math.min(4, Math.max(0, state.volume * fadeFactor));
 }
 
 function computeVolumeCurve(
