@@ -462,7 +462,23 @@ async function encodeVideoChunks(
 			encoder.encode(videoFrame, { keyFrame: frame === startFrame });
 			videoFrame.close();
 
-			if ((frame + 1) % 15 === 0) {
+			// backpressure: only pause when the encoder's internal queue is full, instead
+			// of a fixed yield every N frames. encoding runs on a separate thread, so the
+			// render loop stays at full speed when the encoder keeps up, while the queue
+			// is still prevented from growing unbounded. falls back to a periodic yield
+			// on engines without encodeQueueSize (older WebCodecs).
+			const queueSize =
+				typeof (encoder as { encodeQueueSize?: number }).encodeQueueSize === 'number'
+					? (encoder as { encodeQueueSize: number }).encodeQueueSize
+					: 0;
+			if (queueSize >= 8) {
+				while (
+					typeof (encoder as { encodeQueueSize?: number }).encodeQueueSize === 'number' &&
+					(encoder as { encodeQueueSize: number }).encodeQueueSize > 4
+				) {
+					await new Promise((resolve) => setTimeout(resolve, 0));
+				}
+			} else if ((frame + 1) % 30 === 0) {
 				await new Promise((resolve) => setTimeout(resolve, 0));
 			}
 			if ((frame + 1) % PROGRESS_UPDATE_INTERVAL_FRAMES === 0 || frame === totalFrames - 1) {
@@ -1047,8 +1063,6 @@ function renderFrame(
 	const ctx = canvas.getContext('2d');
 	if (!ctx) return;
 
-	ctx.clearRect(0, 0, canvas.width, canvas.height);
-
 	ctx.fillStyle = '#000000';
 	ctx.fillRect(0, 0, canvas.width, canvas.height);
 
@@ -1245,7 +1259,10 @@ export async function exportVideo(options: ExportOptions): Promise<Blob | null> 
 
 	await waitForMediaReady(clips);
 
-	let mixedBuffer: AudioBuffer | null = null;
+	// kick off audio decode + offline mix in parallel with video rendering: the two
+	// pipelines share no mutable state, and decodeAudioData / startRendering run off
+	// the main thread, so wall-clock time becomes max(video, audio) instead of the sum
+	let mixedBufferPromise: Promise<AudioBuffer | null> = Promise.resolve(null);
 
 	if (audioClips.length > 0) {
 		onProgress?.({
@@ -1255,18 +1272,21 @@ export async function exportVideo(options: ExportOptions): Promise<Blob | null> 
 			message: 'Mixing audio...'
 		});
 
-		try {
-			const { buffers: decodedBuffers, sampleRate } = await decodeAudioAssets(audioClips);
-			mixedBuffer = await mixAudioOffline(
-				audioClips,
-				decodedBuffers,
-				sampleRate,
-				exportStart,
-				exportDuration
-			);
-		} catch {
-			// fall back to video-only export
-		}
+		mixedBufferPromise = (async () => {
+			try {
+				const { buffers: decodedBuffers, sampleRate } = await decodeAudioAssets(audioClips);
+				return await mixAudioOffline(
+					audioClips,
+					decodedBuffers,
+					sampleRate,
+					exportStart,
+					exportDuration
+				);
+			} catch {
+				// fall back to video-only export
+				return null;
+			}
+		})();
 	}
 
 	let finalBlob: Blob | null = null;
@@ -1287,7 +1307,7 @@ export async function exportVideo(options: ExportOptions): Promise<Blob | null> 
 					exportStart,
 					exportDuration,
 					videoEncoderConfig,
-					mixedBuffer,
+					mixedBufferPromise,
 					onProgress
 				);
 			} catch {
@@ -1316,6 +1336,7 @@ export async function exportVideo(options: ExportOptions): Promise<Blob | null> 
 				message: 'Converting to MP4...'
 			});
 
+			const mixedBuffer = await mixedBufferPromise;
 			const audioWavBlob = mixedBuffer ? encodeAudioBufferToWav(mixedBuffer) : null;
 			finalBlob = await transcodeToMp4(webmBlob, quality, audioWavBlob, onProgress, exportDuration);
 		}
@@ -1340,16 +1361,18 @@ async function exportWithWebCodecs(
 	exportStart: number,
 	exportDuration: number,
 	videoEncoderConfig: VideoEncoderConfig,
-	mixedBuffer: AudioBuffer | null,
+	mixedBufferPromise: Promise<AudioBuffer | null>,
 	onProgress?: (progress: ExportProgress) => void
 ): Promise<Blob> {
 	const [videoResult, audioResult] = await Promise.all([
 		encodeVideoChunks(clips, quality, totalFrames, exportStart, videoEncoderConfig, onProgress),
-		mixedBuffer
-			? pickAudioEncoderConfig(mixedBuffer.sampleRate, mixedBuffer.numberOfChannels).then(
-					(audioConfig) => (audioConfig ? encodeAudioAac(mixedBuffer, audioConfig) : null)
-				)
-			: Promise.resolve(null)
+		mixedBufferPromise.then((mixedBuffer) =>
+			mixedBuffer
+				? pickAudioEncoderConfig(mixedBuffer.sampleRate, mixedBuffer.numberOfChannels).then(
+						(audioConfig) => (audioConfig ? encodeAudioAac(mixedBuffer, audioConfig) : null)
+					)
+				: null
+		)
 	]);
 
 	if (audioResult) {
@@ -1371,6 +1394,8 @@ async function exportWithWebCodecs(
 	});
 	const videoOnlyBlob = muxToMp4(videoResult, null);
 
+	// the mix is already resolved by the Promise.all above; await again for the value
+	const mixedBuffer = await mixedBufferPromise;
 	if (!mixedBuffer) return videoOnlyBlob;
 
 	onProgress?.({

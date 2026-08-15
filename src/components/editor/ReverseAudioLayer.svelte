@@ -7,15 +7,16 @@
 		isPlaying?: boolean;
 		rate?: number;
 		volume?: number;
+		trackId: string;
 	};
 
-	let { src, sourceTime = 0, isPlaying = false, rate = 1, volume = 1 }: Props = $props();
+	let { src, sourceTime = 0, isPlaying = false, rate = 1, volume = 1, trackId }: Props = $props();
 
 	let player = $state<ReverseAudioPlayer | null>(null);
 
 	$effect(() => {
 		let cancelled = false;
-		void createReverseAudioPlayer(src).then((created) => {
+		void createReverseAudioPlayer(src, trackId).then((created) => {
 			if (cancelled) {
 				created?.destroy();
 				return;
@@ -30,6 +31,6 @@
 	});
 
 	$effect(() => {
-		player?.update({ playing: isPlaying, sourceTime, rate, volume });
+		player?.update({ playing: isPlaying, sourceTime, rate, volume, trackId });
 	});
 </script>

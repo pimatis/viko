@@ -5,9 +5,12 @@
 	import Player from '../../components/editor/Player.svelte';
 	import PropertiesPanel from '../../components/editor/PropertiesPanel.svelte';
 	import Sidebar from '../../components/editor/Sidebar.svelte';
+	import AudioMixer from '../../components/editor/AudioMixer.svelte';
+	import SourceMonitor from '../../components/editor/SourceMonitor.svelte';
 	import Timeline from '../../components/editor/Timeline.svelte';
 	import Toolbar from '../../components/editor/Toolbar.svelte';
 	import { sound } from '$lib/sound';
+	import { audioEngine } from '$lib/audio/engine';
 	import { useShortcuts, formatShortcut, type ShortcutBinding } from '$lib/shortcuts';
 	import { Button } from '$lib/components/ui/button';
 	import * as Command from '$lib/components/ui/command';
@@ -71,6 +74,7 @@
 		ZoomOut,
 		Maximize2,
 		MousePointer2,
+		MonitorPlay,
 		Scissors,
 		Hand,
 		Type,
@@ -116,6 +120,7 @@
 		DEFAULT_BEZIER_POINTS,
 		FRAME_RATE,
 		getClipKeyframeValue,
+		getLinkedClipIds,
 		isBlendMode,
 		KEYFRAME_PROPERTIES,
 		removeClipKeyframesAtTime,
@@ -230,6 +235,15 @@
 	let projectLoadSequence = 0;
 	let mediaRestorePromise: Promise<void> | null = null;
 	let commandPaletteOpen = $state(false);
+	let sourceMonitorOpen = $state(false);
+	let sourceAssetId = $state<string | null>(null);
+	let sourceTime = $state(0);
+	let sourceIsPlaying = $state(false);
+	let sourceInPoint = $state<number | null>(null);
+	let sourceOutPoint = $state<number | null>(null);
+	let sourceMonitorRootEl = $state<HTMLElement | null>(null);
+	let mixerOpen = $state(false);
+	let mixerMasterVolume = $state(1);
 
 	const sortedVersions = $derived([...versions].sort((a, b) => b.createdAt - a.createdAt));
 	const exportResolution = $derived(getExportResolution(playerAspectRatio, exportQuality));
@@ -410,6 +424,18 @@
 			)
 		)
 	);
+	const sourceAsset = $derived(mediaAssets.find((asset) => asset.id === sourceAssetId) ?? null);
+
+	// the panel (or a control inside it) must hold focus for its shortcuts to take
+	// over. checked against document.activeElement at call time - focus events are
+	// unreliable in some embedded webviews, but activeElement is always accurate
+	function isSourceMonitorActive(): boolean {
+		if (!sourceMonitorOpen || !sourceAsset) return false;
+		if ((sourceAsset.duration ?? 0) <= 0) return false;
+		const root = sourceMonitorRootEl;
+		if (!root) return false;
+		return root.contains(document.activeElement);
+	}
 
 	const MIN_TIMELINE_DURATION = 30;
 	const TIMELINE_TAIL_DURATION = 30;
@@ -572,6 +598,22 @@
 			run: () => toggleSidebar()
 		},
 		{
+			id: 'palette-toggle-source-monitor',
+			label: 'Toggle Source Monitor',
+			keywords: 'source preview monitor in out insert',
+			group: 'View',
+			icon: MonitorPlay,
+			run: () => toggleSourceMonitor()
+		},
+		{
+			id: 'palette-toggle-mixer',
+			label: 'Toggle Audio Mixer',
+			keywords: 'audio mixer fader vu pan volume mute levels',
+			group: 'View',
+			icon: AudioLines,
+			run: () => toggleMixer()
+		},
+		{
 			id: 'palette-zoom-in',
 			label: 'Zoom In',
 			keywords: 'timeline magnify',
@@ -612,7 +654,10 @@
 			group: 'Transport',
 			hint: 'I',
 			icon: ArrowRightToLine,
-			run: () => handleSetInPoint()
+			run: () => {
+				if (isSourceMonitorActive()) setSourceInPoint();
+				else handleSetInPoint();
+			}
 		},
 		{
 			id: 'palette-set-out',
@@ -621,7 +666,10 @@
 			group: 'Transport',
 			hint: 'O',
 			icon: ArrowLeftToLine,
-			run: () => handleSetOutPoint()
+			run: () => {
+				if (isSourceMonitorActive()) setSourceOutPoint();
+				else handleSetOutPoint();
+			}
 		},
 		{
 			id: 'palette-clear-in-out',
@@ -630,7 +678,10 @@
 			group: 'Transport',
 			hint: formatShortcut({ key: 'i', ctrlOrMeta: true, shift: true }),
 			icon: X,
-			run: () => handleClearInOutPoints()
+			run: () => {
+				if (isSourceMonitorActive()) clearSourceInOutPoints();
+				else handleClearInOutPoints();
+			}
 		},
 		// tools
 		...paletteToolOptions.map((tool) => ({
@@ -1043,6 +1094,76 @@
 		}
 	}
 
+	// shared builder for placing a media asset on the timeline; both the media bin
+	// drag/drop and the source monitor insert flow through here. an optional source
+	// window (sourceStart/sourceDuration) restricts the clip to a range of the asset
+	function buildAssetClipRequest(
+		asset: MediaAsset,
+		startTime: number,
+		trackId: string,
+		createTrack = false,
+		sourceStart?: number,
+		sourceDuration?: number
+	): ClipInsertRequest | null {
+		const start = roundToFrame(startTime);
+		const duration =
+			sourceDuration !== undefined && sourceDuration > 0
+				? roundToFrame(sourceDuration)
+				: (asset.duration ?? DEFAULT_ASSET_DURATION);
+		const instanceId = createEntityId('clip-instance');
+		const clip: Clip = {
+			id: createEntityId('clip'),
+			name: asset.name,
+			startTime: start,
+			duration,
+			assetId: asset.id,
+			sourceInstanceId: instanceId,
+			sourceStart,
+			sourceDuration:
+				sourceDuration !== undefined
+					? roundToFrame(sourceDuration)
+					: asset.kind === 'image'
+						? undefined
+						: (asset.duration ?? undefined)
+		};
+		const request: ClipInsertRequest = {
+			id: createEntityId('clip-insert'),
+			clips: [clip],
+			targetTrackId: trackId,
+			trackType: asset.kind === 'audio' ? 'audio' : 'video',
+			createTrack,
+			trackName: createTrack ? asset.name : undefined
+		};
+		// video assets carry their own audio; add a linked audio clip on an audio
+		// track (creating one when needed) so the pair edits together
+		if (asset.kind === 'video') {
+			const audioTrack = tracks.find((track) => track.type === 'audio' && !track.locked);
+			request.linkedClips = {
+				clips: [
+					{
+						id: createEntityId('clip'),
+						name: asset.name,
+						startTime: start,
+						duration,
+						assetId: asset.id,
+						sourceInstanceId: instanceId,
+						sourceStart,
+						sourceDuration:
+							sourceDuration !== undefined
+								? roundToFrame(sourceDuration)
+								: (asset.duration ?? undefined),
+						volume: 1
+					}
+				],
+				trackType: 'audio',
+				targetTrackId: audioTrack?.id,
+				createTrack: !audioTrack,
+				trackName: !audioTrack ? asset.name : undefined
+			};
+		}
+		return request;
+	}
+
 	function dropMediaAsset(
 		assetId: string,
 		trackId: string,
@@ -1051,19 +1172,149 @@
 	) {
 		const asset = mediaAssets.find((candidate) => candidate.id === assetId);
 		if (!asset) return;
-		addTimelineClip(
-			asset.name,
-			asset.duration ?? DEFAULT_ASSET_DURATION,
-			trackId,
-			startTime,
-			asset.id,
-			asset.kind === 'audio' ? 'audio' : 'video',
-			undefined,
-			undefined,
-			asset.kind === 'image' ? undefined : (asset.duration ?? undefined),
-			createTrack,
-			createTrack ? asset.name : undefined
+		clipInsertRequest = buildAssetClipRequest(asset, startTime, trackId, createTrack);
+	}
+
+	// ---- source monitor -------------------------------------------------------
+
+	function openSourceMonitor(assetId: string | null) {
+		if (assetId === null) return;
+		const asset = mediaAssets.find((candidate) => candidate.id === assetId);
+		if (!asset) return;
+		sourceIsPlaying = false;
+		sourceAssetId = assetId;
+		sourceTime = 0;
+		sourceInPoint = null;
+		sourceOutPoint = null;
+		sourceMonitorOpen = true;
+	}
+
+	function closeSourceMonitor() {
+		sourceIsPlaying = false;
+		sourceMonitorOpen = false;
+		sourceAssetId = null;
+		sourceTime = 0;
+		sourceInPoint = null;
+		sourceOutPoint = null;
+	}
+
+	function toggleSourceMonitor() {
+		if (sourceMonitorOpen) {
+			closeSourceMonitor();
+			return;
+		}
+		const asset = sourceAsset ?? mediaAssets[0] ?? null;
+		if (asset) openSourceMonitor(asset.id);
+	}
+
+	function toggleMixer() {
+		mixerOpen = !mixerOpen;
+	}
+
+	function markMixerDirty() {
+		isSaved = false;
+		autoSaveBlocked = false;
+	}
+
+	function handleMixerTrackVolume(trackId: string, volume: number) {
+		const track = tracks.find((candidate) => candidate.id === trackId);
+		if (!track) return;
+		track.volume = volume;
+		audioEngine.setTrackVolume(trackId, volume);
+		markMixerDirty();
+	}
+
+	function handleMixerTrackPan(trackId: string, pan: number) {
+		const track = tracks.find((candidate) => candidate.id === trackId);
+		if (!track) return;
+		track.pan = pan;
+		audioEngine.setTrackPan(trackId, pan);
+		markMixerDirty();
+	}
+
+	function handleMixerToggleMute(trackId: string) {
+		const track = tracks.find((candidate) => candidate.id === trackId);
+		if (!track) return;
+		track.muted = !track.muted;
+		markMixerDirty();
+	}
+
+	function handleMixerMasterVolume(volume: number) {
+		mixerMasterVolume = volume;
+		audioEngine.setMasterVolume(volume);
+	}
+
+	function handleMixerResetTrack(trackId: string) {
+		const track = tracks.find((candidate) => candidate.id === trackId);
+		if (!track) return;
+		track.volume = 1;
+		track.pan = 0;
+		track.muted = false;
+		audioEngine.setTrackVolume(trackId, 1);
+		audioEngine.setTrackPan(trackId, 0);
+		markMixerDirty();
+	}
+
+	function handleMixerResetMaster() {
+		mixerMasterVolume = 1;
+		audioEngine.setMasterVolume(1);
+	}
+
+	function setSourceInPoint(time?: number) {
+		const asset = sourceAsset;
+		if (!asset || !(asset.duration ?? 0)) return;
+		const duration = asset.duration ?? 0;
+		const t = roundToFrame(
+			time !== undefined
+				? Math.min(duration, Math.max(0, time))
+				: Math.min(duration, Math.max(0, sourceTime))
 		);
+		sourceInPoint = t;
+		// setting an in point past the current out point invalidates the out point
+		if (sourceOutPoint !== null && sourceOutPoint <= t) sourceOutPoint = null;
+	}
+
+	function setSourceOutPoint(time?: number) {
+		const asset = sourceAsset;
+		if (!asset || !(asset.duration ?? 0)) return;
+		const duration = asset.duration ?? 0;
+		const t = roundToFrame(
+			time !== undefined
+				? Math.min(duration, Math.max(0, time))
+				: Math.min(duration, Math.max(0, sourceTime))
+		);
+		sourceOutPoint = t;
+		// setting an out point before the current in point invalidates the in point
+		if (sourceInPoint !== null && sourceInPoint >= t) sourceInPoint = null;
+	}
+
+	function clearSourceInOutPoints() {
+		sourceInPoint = null;
+		sourceOutPoint = null;
+	}
+
+	// place the marked source window (or the whole asset) at the timeline playhead,
+	// creating a fresh video/audio track pair for video assets
+	function insertFromSourceMonitor() {
+		const asset = sourceAsset;
+		if (!asset) return;
+		let sourceStart: number | undefined;
+		let sourceDuration: number | undefined;
+		if (sourceInPoint !== null || sourceOutPoint !== null) {
+			const start = sourceInPoint ?? 0;
+			const end = sourceOutPoint ?? asset.duration ?? start;
+			sourceStart = roundToFrame(start);
+			sourceDuration = Math.max(1 / FRAME_RATE, roundToFrame(Math.max(0, end - start)));
+		}
+		const request = buildAssetClipRequest(
+			asset,
+			currentTime,
+			'',
+			true,
+			sourceStart,
+			sourceDuration
+		);
+		if (request) clipInsertRequest = request;
 	}
 
 	function dropEditorResource(resourceId: string, trackId: string, startTime: number) {
@@ -1557,7 +1808,15 @@
 				color: typeof value.color === 'string' ? value.color.slice(0, 30) : 'blue',
 				clips,
 				muted: value.muted === true,
-				locked: value.locked === true
+				locked: value.locked === true,
+				volume:
+					typeof value.volume === 'number' && Number.isFinite(value.volume)
+						? Math.min(2, Math.max(0, value.volume))
+						: 1,
+				pan:
+					typeof value.pan === 'number' && Number.isFinite(value.pan)
+						? Math.min(1, Math.max(-1, value.pan))
+						: 0
 			}
 		]);
 		return reconciledTrack;
@@ -2047,6 +2306,23 @@
 		propertyChangeFrame = requestAnimationFrame(flushClipPropertyChange);
 	}
 
+	function handleUnlinkClip(clipId: string) {
+		const linkedIds = getLinkedClipIds(tracks, clipId);
+		if (linkedIds.length === 0) return;
+		sound.select();
+		const unlinkIds = new Set([clipId, ...linkedIds]);
+		const nextTracks = tracks.map((track) => ({
+			...track,
+			clips: track.clips.map((clip) =>
+				unlinkIds.has(clip.id) ? { ...clip, sourceInstanceId: undefined } : clip
+			)
+		}));
+		tracks = nextTracks;
+		isSaved = false;
+		autoSaveBlocked = false;
+		projectNotice = 'Linked clips unlinked';
+	}
+
 	function handleAddKeyframe(
 		clipId: string,
 		property: KeyframeProperty,
@@ -2136,6 +2412,17 @@
 		}
 	});
 
+	// starting timeline playback silences the source monitor so the two previews
+	// never play audio at the same time
+	$effect(() => {
+		if (isPlaying) sourceIsPlaying = false;
+	});
+
+	// close the panel when its media is removed from the project
+	$effect(() => {
+		if (sourceMonitorOpen && !sourceAsset) closeSourceMonitor();
+	});
+
 	$effect(() => {
 		if (isSaved || !autoSaveEnabled || isSaving || autoSaveBlocked) return;
 
@@ -2191,6 +2478,17 @@
 			window.removeEventListener('keydown', handleGlobalKeydown);
 			window.removeEventListener('mousedown', handleGlobalMouseDown);
 		};
+	});
+
+	// keep the live engine's track/master settings in sync with the project
+	// state (applies after load, new project, version restore, undo/redo...)
+	$effect(() => {
+		const snapshot = tracks;
+		for (const track of snapshot) {
+			audioEngine.setTrackVolume(track.id, track.volume ?? 1);
+			audioEngine.setTrackPan(track.id, track.pan ?? 0);
+		}
+		audioEngine.setMasterVolume(mixerMasterVolume);
 	});
 
 	onDestroy(() => {
@@ -2257,6 +2555,7 @@
 			onToggle={toggleSidebar}
 			onMediaAssetsChange={handleMediaAssetsChange}
 			onAssetApply={(asset) => dropMediaAsset(asset.id, '', currentTime, true)}
+			onAssetSelect={openSourceMonitor}
 			onResourceApply={applyResource}
 			onCreateText={createDefaultText}
 			onGenerateCaptions={handleGenerateCaptions}
@@ -2277,6 +2576,25 @@
 				onSetInPoint={handleSetInPoint}
 				onSetOutPoint={handleSetOutPoint}
 				onClearInOutPoints={handleClearInOutPoints}
+				{sourceMonitorOpen}
+				onSourceMonitorToggle={toggleSourceMonitor}
+				{mixerOpen}
+				onMixerToggle={toggleMixer}
+			/>
+			<SourceMonitor
+				bind:open={sourceMonitorOpen}
+				asset={sourceAsset}
+				bind:currentTime={sourceTime}
+				bind:isPlaying={sourceIsPlaying}
+				bind:inPoint={sourceInPoint}
+				bind:outPoint={sourceOutPoint}
+				bind:root={sourceMonitorRootEl}
+				onClose={closeSourceMonitor}
+				onPlaybackChange={(playing) => (sourceIsPlaying = playing)}
+				onSetInPoint={setSourceInPoint}
+				onSetOutPoint={setSourceOutPoint}
+				onClearInOut={clearSourceInOutPoints}
+				onInsert={insertFromSourceMonitor}
 			/>
 			<Player
 				bind:currentTime
@@ -2320,10 +2638,27 @@
 					canNormalizeAudio={selectedClipHasAudio}
 					{normalizing}
 					onNormalizeAudio={handleNormalizeAudio}
+					linked={selectedClip ? getLinkedClipIds(tracks, selectedClip.id).length > 0 : false}
+					onUnlink={() => selectedClip && handleUnlinkClip(selectedClip.id)}
 				/>
 			</div>
 		{/if}
 	</div>
+
+	{#if mixerOpen}
+		<AudioMixer
+			{tracks}
+			{mediaAssets}
+			masterVolume={mixerMasterVolume}
+			onMasterVolume={handleMixerMasterVolume}
+			onTrackVolume={handleMixerTrackVolume}
+			onTrackPan={handleMixerTrackPan}
+			onToggleMute={handleMixerToggleMute}
+			onResetTrack={handleMixerResetTrack}
+			onResetMaster={handleMixerResetMaster}
+			onClose={() => (mixerOpen = false)}
+		/>
+	{/if}
 
 	<Timeline
 		bind:currentTime

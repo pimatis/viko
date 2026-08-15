@@ -19,7 +19,7 @@
 	} from '$lib/effects';
 	import { SIDEBAR_ASSET_MIME, SIDEBAR_RESOURCE_MIME } from '$lib/editor/sidebar';
 	import { TEXT_PRESETS, type TextStyle } from '$lib/editor/text';
-	import type { EditorTool } from '$lib/editor/toolbar';
+	import { clampTimelineZoom, type EditorTool } from '$lib/editor/toolbar';
 	import { cloneColorGradeOrNull } from '$lib/grading';
 	import { Pencil } from '@lucide/svelte';
 	import {
@@ -30,9 +30,12 @@
 		getClipSourceTime,
 		getClipSpeedRange,
 		groupClips,
+		expandLinkedSelection,
+		getLinkedClipIds,
 		KEYFRAME_PROPERTIES,
 		moveClip,
 		moveGroupedClips,
+		moveLinkedClips,
 		nudgeClips,
 		resizeClip,
 		rippleDeleteClips,
@@ -248,6 +251,8 @@
 		{ ...copyShortcut, ignoreWhenTyping: true, onKeyDown: copySelectedClips },
 		{ ...pasteShortcut, ignoreWhenTyping: true, onKeyDown: pasteClips },
 		{ ...duplicateShortcut, ignoreWhenTyping: true, onKeyDown: duplicateSelectedClips },
+		{ key: ',', ignoreWhenTyping: true, onKeyDown: insertClipsAtPlayhead },
+		{ key: '.', ignoreWhenTyping: true, onKeyDown: overwriteClipsAtPlayhead },
 		{
 			...clearInOutShortcut,
 			ignoreWhenTyping: true,
@@ -720,7 +725,9 @@
 	}
 
 	function setClipSelection(clipIds: string[]) {
-		const uniqueClipIds = [...new Set(clipIds)];
+		// linked A/V pairs select together: selecting a video clip also selects its
+		// matching audio clip (and vice versa)
+		const uniqueClipIds = [...new Set(expandLinkedSelection(tracks, clipIds))];
 		selectedClipIds = uniqueClipIds;
 		selectedClipId = uniqueClipIds.at(-1) ?? null;
 		onClipSelect(selectedClipId);
@@ -765,7 +772,9 @@
 			color: TRACK_COLOR_NAMES[tracks.length % TRACK_COLOR_NAMES.length] ?? 'blue',
 			clips: [],
 			muted: false,
-			locked: false
+			locked: false,
+			volume: 1,
+			pan: 0
 		};
 	}
 
@@ -795,7 +804,9 @@
 			color: 'purple',
 			clips: [adjustmentClip],
 			muted: false,
-			locked: false
+			locked: false,
+			volume: 1,
+			pan: 0
 		};
 		commitTracks([...tracks, newTrack]);
 		activeTrackId = newTrack.id;
@@ -809,16 +820,17 @@
 		const targetTrack = request.createTrack
 			? undefined
 			: (requestedTrack ?? tracks.find((track) => !track.locked));
-		if (targetTrack) {
-			let baseTracks = tracks;
-			const insertTime = request.clips[0]?.startTime ?? currentTime;
-			const totalInsertDuration = request.clips.reduce((sum, c) => sum + c.duration, 0);
-			if (rippleMode && totalInsertDuration > 0) {
-				const shifted = rippleInsertClips(tracks, targetTrack.id, insertTime, totalInsertDuration);
-				if (shifted !== tracks) baseTracks = shifted;
-			}
-			commitTracks(
-				baseTracks.map((track) =>
+		let baseTracks = tracks;
+		const insertTime = request.clips[0]?.startTime ?? currentTime;
+		const totalInsertDuration = request.clips.reduce((sum, c) => sum + c.duration, 0);
+		if (rippleMode && totalInsertDuration > 0 && targetTrack) {
+			const shifted = rippleInsertClips(tracks, targetTrack.id, insertTime, totalInsertDuration);
+			if (shifted !== tracks) baseTracks = shifted;
+		}
+
+		// primary placement (video clip on its target track, or a fresh track)
+		let nextTracks = targetTrack
+			? baseTracks.map((track) =>
 					track.id === targetTrack.id
 						? {
 								...track,
@@ -828,24 +840,68 @@
 							}
 						: track
 				)
+			: [
+					...baseTracks,
+					{
+						id: createTrackId(),
+						name: request.trackName?.trim().slice(0, 80) || `Track ${tracks.length + 1}`,
+						type: request.trackType,
+						color: TRACK_COLOR_NAMES[0] ?? 'blue',
+						clips: request.clips.map((clip) => ({ ...clip })),
+						muted: false,
+						locked: false,
+						volume: 1,
+						pan: 0
+					}
+				];
+
+		// linked partner (audio clip for a video insert) lands in the same commit
+		if (request.linkedClips && request.linkedClips.clips.length > 0) {
+			const linked = request.linkedClips;
+			const linkedRequestedTrack = tracks.find(
+				(track) => track.id === linked.targetTrackId && !track.locked
 			);
-			activeTrackId = targetTrack.id;
-			setClipSelection(request.clips.map((clip) => clip.id));
-			return;
+			const linkedTargetTrack = linked.createTrack
+				? undefined
+				: (linkedRequestedTrack ??
+					tracks.find((track) => track.type === linked.trackType && !track.locked));
+			if (linkedTargetTrack) {
+				nextTracks = nextTracks.map((track) =>
+					track.id === linkedTargetTrack.id
+						? {
+								...track,
+								clips: [...track.clips, ...linked.clips.map((clip) => ({ ...clip }))].sort(
+									(left, right) => left.startTime - right.startTime
+								)
+							}
+						: track
+				);
+			} else {
+				nextTracks = [
+					...nextTracks,
+					{
+						id: createTrackId(),
+						name: linked.trackName?.trim().slice(0, 80) || `Track ${tracks.length + 1}`,
+						type: linked.trackType,
+						color: TRACK_COLOR_NAMES[0] ?? 'blue',
+						clips: linked.clips.map((clip) => ({ ...clip })),
+						muted: false,
+						locked: false,
+						volume: 1,
+						pan: 0
+					}
+				];
+			}
 		}
 
-		const newTrack: Track = {
-			id: createTrackId(),
-			name: request.trackName?.trim().slice(0, 80) || `Track ${tracks.length + 1}`,
-			type: request.trackType,
-			color: TRACK_COLOR_NAMES[0] ?? 'blue',
-			clips: request.clips.map((clip) => ({ ...clip })),
-			muted: false,
-			locked: false
-		};
-		commitTracks([...tracks, newTrack]);
-		activeTrackId = newTrack.id;
-		setClipSelection(request.clips.map((clip) => clip.id));
+		commitTracks(nextTracks);
+		activeTrackId =
+			targetTrack?.id ??
+			(request.linkedClips?.clips.length ? (nextTracks[nextTracks.length - 1]?.id ?? null) : null);
+		setClipSelection([
+			...request.clips.map((clip) => clip.id),
+			...(request.linkedClips?.clips.map((clip) => clip.id) ?? [])
+		]);
 	}
 
 	function startEditingTrack(track: Track) {
@@ -1040,14 +1096,13 @@
 					rulerIntervals.minorInterval
 				)
 			: clampClipStart(rawStartTime, draggedClip?.duration ?? 0, duration);
-		tracks = draggedClip?.groupId
-			? moveGroupedClips(
-					drag.originalTracks,
-					drag.clipId,
-					nextStartTime - draggedClip.startTime,
-					duration
-				)
-			: moveClip(drag.originalTracks, drag.clipId, drag.targetTrackId, nextStartTime, duration);
+		tracks = moveLinkedClips(
+			drag.originalTracks,
+			drag.clipId,
+			drag.targetTrackId,
+			nextStartTime,
+			duration
+		);
 	}
 
 	function handleMouseUp() {
@@ -1289,6 +1344,33 @@
 		zoom = Math.max(10, zoom - 10);
 	}
 
+	function handleTimelineWheel(event: WheelEvent) {
+		// Touchpad pinch (macOS) and ctrl+wheel (mouse) both arrive as ctrlKey wheel events
+		if (!event.ctrlKey) return;
+		if (!scrollContainer) return;
+
+		event.preventDefault();
+
+		const rect = scrollContainer.getBoundingClientRect();
+		const clientX = event.clientX;
+		const timeAtCursor = Math.max(
+			0,
+			Math.min(duration, (clientX - rect.left + scrollContainer.scrollLeft) / pixelsPerSecond)
+		);
+
+		// Exponential scaling keeps the gesture smooth and direction-agnostic
+		const nextZoom = clampTimelineZoom(zoom * Math.exp(-event.deltaY * 0.01));
+		if (nextZoom === zoom) return;
+		zoom = nextZoom;
+
+		// Keep the time under the cursor at the same screen position after zooming
+		const nextPixelsPerSecond = nextZoom * 0.5;
+		const maxScrollLeft = Math.max(0, scrollContainer.scrollWidth - scrollContainer.clientWidth);
+		const newScrollLeft = timeAtCursor * nextPixelsPerSecond - (clientX - rect.left);
+		scrollContainer.scrollLeft = Math.min(Math.max(0, newScrollLeft), maxScrollLeft);
+		syncHeaderScroll();
+	}
+
 	function toggleMute(trackId: string) {
 		const track = tracks.find((t) => t.id === trackId);
 		if (track?.muted) sound.toggleOff();
@@ -1444,10 +1526,14 @@
 		if (activeTool !== 'select') return;
 		onPropertiesOpen();
 		if (e.ctrlKey || e.metaKey) {
-			const nextSelection = selectedClipIds.includes(clipId)
-				? selectedClipIds.filter((selectedId) => selectedId !== clipId)
-				: [...selectedClipIds, clipId];
-			setClipSelection(nextSelection);
+			if (selectedClipIds.includes(clipId)) {
+				// toggling a linked clip off also removes its partner(s)
+				const removeIds = new Set([clipId, ...getLinkedClipIds(tracks, clipId)]);
+				const nextSelection = selectedClipIds.filter((selectedId) => !removeIds.has(selectedId));
+				setClipSelection(nextSelection);
+			} else {
+				setClipSelection([...selectedClipIds, clipId]);
+			}
 			return;
 		}
 
@@ -1625,15 +1711,33 @@
 		sound.snap();
 		const selectedIds = new Set(getSelectedClipIds());
 		if (selectedIds.size === 0) return;
+		// the playhead also cuts every linked partner, so a razor on the video clip
+		// produces the matching audio pieces in the same commit
+		const clipsToSplit = new Map<string, Clip>();
+		for (const clip of tracks.flatMap((track) => track.clips)) {
+			if (!selectedIds.has(clip.id)) continue;
+			if (currentTime <= clip.startTime || currentTime >= clip.startTime + clip.duration) continue;
+			clipsToSplit.set(clip.id, clip);
+			for (const linkedId of getLinkedClipIds(tracks, clip.id)) {
+				const linked = tracks
+					.flatMap((track) => track.clips)
+					.find((candidate) => candidate.id === linkedId);
+				if (
+					linked &&
+					currentTime > linked.startTime &&
+					currentTime < linked.startTime + linked.duration
+				) {
+					clipsToSplit.set(linkedId, linked);
+				}
+			}
+		}
+		if (clipsToSplit.size === 0) return;
 		const splitClipIds: string[] = [];
 		let didSplit = false;
 		const nextTracks = tracks.map((track) => {
 			if (track.locked) return track;
 			const nextClips = track.clips.flatMap((clip) => {
-				if (!selectedIds.has(clip.id)) return [clip];
-				if (currentTime <= clip.startTime || currentTime >= clip.startTime + clip.duration) {
-					return [clip];
-				}
+				if (!clipsToSplit.has(clip.id)) return [clip];
 
 				didSplit = true;
 				const splitTime = roundToFrame(currentTime - clip.startTime);
@@ -1853,7 +1957,8 @@
 
 	function deleteSelectedClips() {
 		sound.delete();
-		const selectedIds = new Set(getSelectedClipIds());
+		// deleting a linked clip also deletes its partner(s)
+		const selectedIds = new Set(expandLinkedSelection(tracks, getSelectedClipIds()));
 		if (selectedIds.size === 0) return;
 		const nextTracks = rippleMode
 			? rippleDeleteClips(tracks, [...selectedIds])
@@ -1868,7 +1973,7 @@
 	}
 
 	function rippleDeleteSelectedClips() {
-		const selectedIds = getSelectedClipIds();
+		const selectedIds = expandLinkedSelection(tracks, getSelectedClipIds());
 		if (selectedIds.length === 0) return;
 		sound.delete();
 		const nextTracks = rippleDeleteClips(tracks, selectedIds);
@@ -2111,8 +2216,7 @@
 
 		let baseTracks = tracks;
 		if (rippleMode) {
-			const allNewClips = Object.values(additions).flat();
-			const totalDuration = allNewClips.reduce((sum, c) => sum + c.duration, 0);
+			const totalDuration = getInsertionSpan(additions, currentTime);
 			for (const targetId of Object.keys(additions)) {
 				const shifted = rippleInsertClips(baseTracks, targetId, currentTime, totalDuration);
 				if (shifted !== baseTracks) baseTracks = shifted;
@@ -2174,6 +2278,244 @@
 		activeTrackId = targetTrack.id;
 		setClipSelection([newClipId]);
 		sound.drop();
+	}
+
+	// shared source for insert/overwrite editing: rebuild the clipboard entries as
+	// fresh clips at the playhead, each targeting the active track (single entry)
+	// or its original source track (multi-entry), preserving relative offsets
+	function buildClipsFromClipboard(insertTime: number): {
+		additions: Record<string, Clip[]>;
+		pastedClipIds: string[];
+	} {
+		const additions: Record<string, Clip[]> = Object.create(null);
+		const pastedClipIds: string[] = [];
+		if (!clipboard || clipboard.entries.length === 0) return { additions, pastedClipIds };
+		const preferredTrack =
+			tracks.find((track) => track.id === activeTrackId && !track.locked) ??
+			tracks.find((track) => !track.locked);
+		if (!preferredTrack) return { additions, pastedClipIds };
+
+		for (const entry of clipboard.entries) {
+			const sourceTrack = tracks.find((track) => track.id === entry.sourceTrackId && !track.locked);
+			const targetTrack =
+				clipboard.entries.length === 1 ? preferredTrack : (sourceTrack ?? preferredTrack);
+			if (!targetTrack) continue;
+			const newClipId = createClipId();
+			const newClip = {
+				...entry.clip,
+				id: newClipId,
+				sourceInstanceId: newClipId,
+				colorGrade: cloneColorGradeOrNull(entry.clip.colorGrade),
+				keyframes: entry.clip.keyframes?.map((keyframe, index) => ({
+					...keyframe,
+					id: `${newClipId}-keyframe-${index}`
+				})),
+				startTime: clampClipStart(insertTime + entry.offset, entry.clip.duration, duration)
+			};
+			additions[targetTrack.id] = [...(additions[targetTrack.id] ?? []), newClip];
+			pastedClipIds.push(newClip.id);
+			activeTrackId = targetTrack.id;
+		}
+		return { additions, pastedClipIds };
+	}
+
+	// the actual timeline span the inserted clips occupy (end of the last clip
+	// minus the playhead). this is the ripple/overwrite amount - the SUM of the
+	// durations would double-count linked pairs that span multiple tracks.
+	function getInsertionSpan(additions: Record<string, Clip[]>, insertTime: number): number {
+		let spanEnd = insertTime;
+		for (const clip of Object.values(additions).flat()) {
+			spanEnd = Math.max(spanEnd, clip.startTime + clip.duration);
+		}
+		return Math.max(0, spanEnd - insertTime);
+	}
+
+	// split every clip on a track at the given time (razor semantics: sourceStart
+	// and keyframes follow the same rules as the razor tool). used by the insert
+	// edit so a splice through the middle of a clip produces a clean edge.
+	function splitTrackAtTime(baseTracks: Track[], trackId: string, splitTime: number): Track[] {
+		let changed = false;
+		const nextTracks = baseTracks.map((track) => {
+			if (track.id !== trackId || track.locked) return track;
+			const nextClips = track.clips.flatMap((clip) => {
+				if (splitTime <= clip.startTime || splitTime >= clip.startTime + clip.duration) {
+					return [clip];
+				}
+				changed = true;
+				const leftId = createClipId();
+				const rightId = createClipId();
+				const clipSplitTime = roundToFrame(splitTime - clip.startTime);
+				const splitKeyframes = splitClipKeyframes(
+					clip,
+					clipSplitTime,
+					`${leftId}-keyframe`,
+					`${rightId}-keyframe`
+				);
+				const splitSourceTime = roundToFrame(getClipSourceTime(clip, clipSplitTime));
+				const leftClip = {
+					...clip,
+					id: leftId,
+					duration: clipSplitTime,
+					keyframes: splitKeyframes.left,
+					sourceStart: clip.reversed === true ? splitSourceTime : (clip.sourceStart ?? 0)
+				};
+				const rightClip = {
+					...clip,
+					id: rightId,
+					startTime: splitTime,
+					duration: roundToFrame(clip.startTime + clip.duration - splitTime),
+					sourceStart:
+						clip.frozen === true || clip.reversed === true
+							? (clip.sourceStart ?? 0)
+							: splitSourceTime,
+					keyframes: splitKeyframes.right
+				};
+				return [leftClip, rightClip];
+			});
+			return { ...track, clips: nextClips };
+		});
+		return changed ? nextTracks : baseTracks;
+	}
+
+	// Insert edit (,): splice the clipboard into the timeline at the playhead.
+	// clips spanning the playhead are split first, then every unlocked track's
+	// clips at/after the playhead ripple right by the total inserted duration, so
+	// nothing gets covered - a true insert edit.
+	function insertClipsAtPlayhead() {
+		const { additions, pastedClipIds } = buildClipsFromClipboard(currentTime);
+		if (pastedClipIds.length === 0) return;
+		const totalDuration = getInsertionSpan(additions, currentTime);
+		let baseTracks = tracks;
+		// 1) split clips that span the playhead on every unlocked track
+		for (const track of tracks) {
+			if (track.locked) continue;
+			baseTracks = splitTrackAtTime(baseTracks, track.id, currentTime);
+		}
+		// 2) ripple: shift every clip at/after the playhead right by the insert
+		for (const track of tracks) {
+			if (track.locked) continue;
+			const shifted = rippleInsertClips(baseTracks, track.id, currentTime, totalDuration);
+			if (shifted !== baseTracks) baseTracks = shifted;
+		}
+		commitTracks(
+			baseTracks.map((track) => ({
+				...track,
+				clips: [...track.clips, ...(additions[track.id] ?? [])].sort(
+					(left, right) => left.startTime - right.startTime
+				)
+			}))
+		);
+		setClipSelection(pastedClipIds);
+		sound.drop();
+	}
+
+	// Overwrite edit (.): replace the [playhead, playhead + inserted duration)
+	// range on every track that receives a clip - overlapping clips are trimmed,
+	// removed or split, and nothing shifts (standard overwrite semantics).
+	function overwriteClipsAtPlayhead() {
+		const { additions, pastedClipIds } = buildClipsFromClipboard(currentTime);
+		if (pastedClipIds.length === 0) return;
+		const totalDuration = getInsertionSpan(additions, currentTime);
+		let baseTracks = tracks;
+		for (const targetId of Object.keys(additions)) {
+			baseTracks = overwriteRangeOnTrack(baseTracks, targetId, currentTime, totalDuration);
+		}
+		commitTracks(
+			baseTracks.map((track) => ({
+				...track,
+				clips: [...track.clips, ...(additions[track.id] ?? [])].sort(
+					(left, right) => left.startTime - right.startTime
+				)
+			}))
+		);
+		setClipSelection(pastedClipIds);
+		sound.drop();
+	}
+
+	// clear the [insertTime, insertTime + insertDuration) range on one track: clips
+	// fully inside are removed, clips hanging over an edge are trimmed, and a clip
+	// spanning the whole range is split into head + tail pieces. sourceStart and
+	// keyframes follow the same rules as the razor tool so the remaining content
+	// stays glued to its source position.
+	function overwriteRangeOnTrack(
+		baseTracks: Track[],
+		targetTrackId: string,
+		insertTime: number,
+		insertDuration: number
+	): Track[] {
+		if (insertDuration <= 0) return baseTracks;
+		const rangeEnd = insertTime + insertDuration;
+		let changed = false;
+		const nextTracks = baseTracks.map((track) => {
+			if (track.id !== targetTrackId || track.locked) return track;
+			const nextClips: Clip[] = [];
+			for (const clip of track.clips) {
+				const clipEnd = clip.startTime + clip.duration;
+				if (clipEnd <= insertTime || clip.startTime >= rangeEnd) {
+					nextClips.push(clip);
+					continue;
+				}
+				changed = true;
+				// fully covered by the range: remove
+				if (clip.startTime >= insertTime && clipEnd <= rangeEnd) continue;
+				// overlaps only the range start: keep the head
+				if (clip.startTime < insertTime && clipEnd <= rangeEnd) {
+					const headDuration = roundToFrame(insertTime - clip.startTime);
+					nextClips.push({
+						...clip,
+						duration: headDuration,
+						keyframes: trimClipKeyframesEnd(clip, headDuration, `${clip.id}-overwrite-end`)
+					});
+					continue;
+				}
+				// overlaps only the range end: keep the tail
+				if (clip.startTime >= insertTime && clipEnd > rangeEnd) {
+					const newStart = roundToFrame(rangeEnd);
+					const splitTime = rangeEnd - clip.startTime;
+					nextClips.push({
+						...clip,
+						startTime: newStart,
+						duration: roundToFrame(clipEnd - newStart),
+						sourceStart:
+							clip.frozen === true || clip.reversed === true
+								? (clip.sourceStart ?? 0)
+								: getClipSourceTime(clip, splitTime),
+						keyframes: trimClipKeyframesStart(clip, splitTime, `${clip.id}-overwrite-start`)
+					});
+					continue;
+				}
+				// spans the whole range: split into head + tail
+				const leftId = createClipId();
+				const rightId = createClipId();
+				const splitKeyframes = splitClipKeyframes(
+					clip,
+					insertTime - clip.startTime,
+					`${leftId}-keyframe`,
+					`${rightId}-keyframe`
+				);
+				const headDuration = roundToFrame(insertTime - clip.startTime);
+				const tailStart = roundToFrame(rangeEnd);
+				nextClips.push({
+					...clip,
+					id: leftId,
+					duration: headDuration,
+					keyframes: splitKeyframes.left
+				});
+				nextClips.push({
+					...clip,
+					id: rightId,
+					startTime: tailStart,
+					duration: roundToFrame(clip.startTime + clip.duration - tailStart),
+					sourceStart:
+						clip.frozen === true || clip.reversed === true
+							? (clip.sourceStart ?? 0)
+							: getClipSourceTime(clip, rangeEnd - clip.startTime),
+					keyframes: splitKeyframes.right
+				});
+			}
+			return { ...track, clips: nextClips };
+		});
+		return changed ? nextTracks : baseTracks;
 	}
 
 	function getClipboardClipType(entry: ClipboardEntry): string {
@@ -2550,8 +2892,27 @@
 						class="size-5"
 						onclick={pasteClips}
 						aria-label="Paste all"
+						title="Paste all at playhead"
 					>
 						<ClipboardPaste class="size-3" />
+					</Button>
+					<Button
+						variant="ghost"
+						size="sm"
+						class="h-5 px-1.5 text-[10px] text-muted-foreground hover:text-foreground"
+						onclick={insertClipsAtPlayhead}
+						title="Insert at playhead (,) - ripples all unlocked tracks"
+					>
+						Insert
+					</Button>
+					<Button
+						variant="ghost"
+						size="sm"
+						class="h-5 px-1.5 text-[10px] text-muted-foreground hover:text-foreground"
+						onclick={overwriteClipsAtPlayhead}
+						title="Overwrite at playhead (.) - replaces the range, no shift"
+					>
+						Overwrite
 					</Button>
 					<Button
 						variant="ghost"
@@ -2731,6 +3092,7 @@
 						class="min-h-0 min-w-0 flex-1 overflow-auto"
 						bind:this={scrollContainer}
 						onscroll={syncHeaderScroll}
+						onwheel={handleTimelineWheel}
 						onmousedown={handleTimelineBackgroundMouseDown}
 						ondragover={(event) => handleInsertDragOver(event, null)}
 						ondrop={(event) => handleInsertDrop(event, null)}

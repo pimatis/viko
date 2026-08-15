@@ -191,14 +191,6 @@ function windowWeight(window: SecondaryPowerWindow, nx: number, ny: number): num
 // separable 1x3 passes), vignette is a radial window and grain is deterministic
 // per-pixel noise seeded by the frame so it shimmers across playback.
 
-// deterministic integer hash -> [0, 1)
-function hash01(x: number, y: number, seed: number): number {
-	let h = (x * 374761393 + y * 668265263 + seed * 2246822519) | 0;
-	h = Math.imul(h ^ (h >>> 13), 1274126177);
-	h ^= h >>> 16;
-	return (h >>> 0) / 4294967296;
-}
-
 function smoothstep(from: number, to: number, value: number): number {
 	const t = Math.min(1, Math.max(0, (value - from) / Math.max(1e-6, to - from)));
 	return t * t * (3 - 2 * t);
@@ -284,17 +276,62 @@ function applySpatialKernels(
 
 	const denoiseAmount = (finish.denoise / 100) * 0.85;
 	const sharpenAmount = (finish.sharpen / 100) * 1.15;
-	for (let offset = 0; offset < data.length; offset += 4) {
-		const base = (offset / 4) * 3;
-		for (let channel = 0; channel < 3; channel += 1) {
-			const o = original[base + channel];
-			const b = blurred[base + channel];
-			let value = o;
-			if (denoiseAmount > 0) value = o + (b - o) * denoiseAmount;
-			if (sharpenAmount > 0) value = value + (o - b) * sharpenAmount;
-			data[offset + channel] = Math.round(clamp01(value) * 255);
+	// fully transparent pixels are never composited, so their RGB here is
+	// irrelevant to the output; skipping them avoids wasted channel work. the
+	// blur above still reads them (untouched), so visible pixels are identical.
+	for (let pixel = 0, offset = 0; pixel < pixelCount; pixel += 1, offset += 4) {
+		if (data[offset + 3] === 0) continue;
+		const base = pixel * 3;
+		const o0 = original[base];
+		const o1 = original[base + 1];
+		const o2 = original[base + 2];
+		const b0 = blurred[base];
+		const b1 = blurred[base + 1];
+		const b2 = blurred[base + 2];
+		let r = o0;
+		let g = o1;
+		let bl = o2;
+		if (denoiseAmount > 0) {
+			r = o0 + (b0 - o0) * denoiseAmount;
+			g = o1 + (b1 - o1) * denoiseAmount;
+			bl = o2 + (b2 - o2) * denoiseAmount;
+		}
+		if (sharpenAmount > 0) {
+			r = r + (o0 - b0) * sharpenAmount;
+			g = g + (o1 - b1) * sharpenAmount;
+			bl = bl + (o2 - b2) * sharpenAmount;
+		}
+		data[offset] = Math.round(clamp01(r) * 255);
+		data[offset + 1] = Math.round(clamp01(g) * 255);
+		data[offset + 2] = Math.round(clamp01(bl) * 255);
+	}
+}
+
+// the vignette multiplier only depends on pixel position + strength, and finish
+// values are constant during an export, so the factor table is computed once and
+// reused across every frame (single-slot cache: one export size at a time).
+let vignetteFactorKey = '';
+let vignetteFactors: Float32Array | null = null;
+
+function getVignetteFactors(amount: number, width: number, height: number): Float32Array | null {
+	if (amount <= 0) return null;
+	const key = `${width}x${height}x${amount}`;
+	if (vignetteFactorKey === key && vignetteFactors) return vignetteFactors;
+	const strength = (amount / 100) * 0.9;
+	const factors = new Float32Array(width * height);
+	for (let y = 0; y < height; y += 1) {
+		const ny = y / Math.max(1, height - 1) - 0.5;
+		for (let x = 0; x < width; x += 1) {
+			const nx = x / Math.max(1, width - 1) - 0.5;
+			// normalize the corner distance so r=1 lands at the frame corners
+			const r = Math.min(1.05, Math.sqrt(nx * nx + ny * ny) / Math.SQRT1_2);
+			const window = smoothstep(0.35, 1, r);
+			factors[y * width + x] = 1 - strength * window;
 		}
 	}
+	vignetteFactorKey = key;
+	vignetteFactors = factors;
+	return factors;
 }
 
 function applyVignette(
@@ -303,22 +340,48 @@ function applyVignette(
 	width: number,
 	height: number
 ): void {
-	if (amount <= 0) return;
-	const strength = (amount / 100) * 0.9;
+	const factors = getVignetteFactors(amount, width, height);
+	if (!factors) return;
+	// factor is in 0..1, so the clamped 0..1 multiply is exactly data * factor
+	for (let offset = 0; offset < data.length; offset += 4) {
+		const factor = factors[offset >> 2];
+		data[offset] = Math.round(data[offset] * factor);
+		data[offset + 1] = Math.round(data[offset + 1] * factor);
+		data[offset + 2] = Math.round(data[offset + 2] * factor);
+	}
+}
+
+// the grain hash's x/y terms are seed-independent and exact in float64, so they
+// are precomputed once per frame size and reused across every frame. the seed
+// terms stay in the original float64 expressions, keeping the hash bit-identical
+// (x and y are small ints, so the split sum rounds exactly like the full one).
+let grainXyKey = '';
+let grainXyParts: Float64Array | null = null;
+
+function getGrainXyParts(width: number, height: number): Float64Array {
+	const key = `${width}x${height}`;
+	if (grainXyKey === key && grainXyParts) return grainXyParts;
+	const parts = new Float64Array(width * height);
+	let index = 0;
 	for (let y = 0; y < height; y += 1) {
-		const ny = y / Math.max(1, height - 1) - 0.5;
+		const yPart = y * 668265263;
 		for (let x = 0; x < width; x += 1) {
-			const nx = x / Math.max(1, width - 1) - 0.5;
-			// normalize the corner distance so r=1 lands at the frame corners
-			const r = Math.min(1.05, Math.sqrt(nx * nx + ny * ny) / Math.SQRT1_2);
-			const window = smoothstep(0.35, 1, r);
-			const factor = 1 - strength * window;
-			const offset = (y * width + x) * 4;
-			data[offset] = Math.round(clamp01((data[offset] / 255) * factor) * 255);
-			data[offset + 1] = Math.round(clamp01((data[offset + 1] / 255) * factor) * 255);
-			data[offset + 2] = Math.round(clamp01((data[offset + 2] / 255) * factor) * 255);
+			parts[index] = x * 374761393 + yPart;
+			index += 1;
 		}
 	}
+	grainXyKey = key;
+	grainXyParts = parts;
+	return parts;
+}
+
+// deterministic integer hash -> [0, 1), split so the seed-dependent part is
+// added to a precomputed exact x/y float64 sum (see getGrainXyParts)
+function hash01(xyPart: number, seed: number): number {
+	let h = (xyPart + seed) | 0;
+	h = Math.imul(h ^ (h >>> 13), 1274126177);
+	h ^= h >>> 16;
+	return (h >>> 0) / 4294967296;
 }
 
 function applyGrain(
@@ -329,21 +392,34 @@ function applyGrain(
 	seed: number
 ): void {
 	if (amount <= 0) return;
-	// peak luma displacement at 100% strength; grain stays subtle like film stock
-	const amplitude = (amount / 100) * 0.055;
+	// peak luma displacement at 100% strength; grain stays subtle like film stock.
+	// the amplitude is folded onto the byte scale so the per-pixel math never
+	// round-trips through 0..1 floats (same result, fewer divisions and clamps)
+	const amp = (amount / 100) * 0.055 * 255;
 	const frameSeed = Math.round(seed * 1e3) % 1_000_000_000;
+	const xyParts = getGrainXyParts(width, height);
+	const seedTerm = frameSeed * 2246822519;
+	const seedTermA = (frameSeed + 7919) * 2246822519;
+	const seedTermB = (frameSeed + 104729) * 2246822519;
+	let pixel = 0;
 	for (let y = 0; y < height; y += 1) {
+		let offset = y * width * 4;
 		for (let x = 0; x < width; x += 1) {
-			const offset = (y * width + x) * 4;
-			const mono = hash01(x, y, frameSeed) * 2 - 1;
-			const chromaA = hash01(x, y, frameSeed + 7919) * 2 - 1;
-			const chromaB = hash01(x, y, frameSeed + 104729) * 2 - 1;
-			const deltaR = amplitude * (mono * 0.8 + chromaA * 0.2);
-			const deltaG = amplitude * (mono * 0.8 + chromaB * 0.2);
-			const deltaB = amplitude * (mono * 0.8 - (chromaA + chromaB) * 0.1);
-			data[offset] = Math.round(clamp01(data[offset] / 255 + deltaR) * 255);
-			data[offset + 1] = Math.round(clamp01(data[offset + 1] / 255 + deltaG) * 255);
-			data[offset + 2] = Math.round(clamp01(data[offset + 2] / 255 + deltaB) * 255);
+			const xyPart = xyParts[pixel];
+			pixel += 1;
+			const mono = hash01(xyPart, seedTerm) * 2 - 1;
+			const chromaA = hash01(xyPart, seedTermA) * 2 - 1;
+			const chromaB = hash01(xyPart, seedTermB) * 2 - 1;
+			const deltaR = amp * (mono * 0.8 + chromaA * 0.2);
+			const deltaG = amp * (mono * 0.8 + chromaB * 0.2);
+			const deltaB = amp * (mono * 0.8 - (chromaA + chromaB) * 0.1);
+			const red = data[offset] + deltaR;
+			const green = data[offset + 1] + deltaG;
+			const blue = data[offset + 2] + deltaB;
+			data[offset] = Math.round(red < 0 ? 0 : red > 255 ? 255 : red);
+			data[offset + 1] = Math.round(green < 0 ? 0 : green > 255 ? 255 : green);
+			data[offset + 2] = Math.round(blue < 0 ? 0 : blue > 255 ? 255 : blue);
+			offset += 4;
 		}
 	}
 }
@@ -433,13 +509,41 @@ function applySecondary(imageData: ImageData, secondary: SecondaryCorrection): v
 // approximates luma-keyed wheels but shares the same data model.
 // `seed` animates the film grain so consecutive frames get fresh noise while
 // remaining deterministic (same frame index => same grain).
+// the color tables + wheel matrices only depend on the (immutable) grade object,
+// so they are computed once per grade instead of every frame. edits create a new
+// object (immutable updates), which misses the cache and rebuilds the tables.
+type GradeTables = ReturnType<typeof buildGradeTables>;
+const gradeTableCache = new WeakMap<ColorGrade, GradeTables>();
+
+function buildGradeTables(grade: ColorGrade) {
+	return {
+		lut: getLutPreset(grade.lutId ?? ''),
+		cubeLut: ensureCubeLutRegistered(grade.customLut),
+		redTable: sampleCurve(grade.curves.red, PIXEL_TABLE_SAMPLES),
+		greenTable: sampleCurve(grade.curves.green, PIXEL_TABLE_SAMPLES),
+		blueTable: sampleCurve(grade.curves.blue, PIXEL_TABLE_SAMPLES),
+		masterTable: sampleCurve(grade.curves.master, PIXEL_TABLE_SAMPLES),
+		masterMatrix: getWheelMatrix(grade.master),
+		shadowsMatrix: getWheelMatrix(grade.shadows),
+		midtonesMatrix: getWheelMatrix(grade.midtones),
+		highlightsMatrix: getWheelMatrix(grade.highlights),
+		shadowsStrength: grade.shadows.strength / 100,
+		midtonesStrength: grade.midtones.strength / 100,
+		highlightsStrength: grade.highlights.strength / 100
+	};
+}
+
 export function applyColorGrade(imageData: ImageData, grade: ColorGrade, seed = 0): void {
 	const amount = clampGradeIntensity(grade.intensity) / 100;
 	const finish = grade.finish ?? clampFinishFilters(undefined);
 	if (amount <= 0 && !isFinishActive(finish)) return;
 	const data = imageData.data;
 	if (amount > 0) {
-		applyColorGradeCore(imageData, grade, amount, data);
+		// transparent pixels can be skipped only when no spatial kernel follows:
+		// vignette/grain touch each pixel on its own, but sharpen/denoise blur
+		// neighbors, and their blur input depends on what the core wrote there
+		const skipTransparent = (finish.denoise ?? 0) <= 0 && (finish.sharpen ?? 0) <= 0;
+		applyColorGradeCore(imageData, grade, amount, data, skipTransparent);
 	}
 	applyFinishFilters(imageData, finish, seed);
 }
@@ -448,23 +552,27 @@ function applyColorGradeCore(
 	imageData: ImageData,
 	grade: ColorGrade,
 	amount: number,
-	data: Uint8ClampedArray
+	data: Uint8ClampedArray,
+	skipTransparent: boolean
 ): void {
-	const lut = getLutPreset(grade.lutId ?? '');
-	const cubeLut = ensureCubeLutRegistered(grade.customLut);
-	const redTable = sampleCurve(grade.curves.red, PIXEL_TABLE_SAMPLES);
-	const greenTable = sampleCurve(grade.curves.green, PIXEL_TABLE_SAMPLES);
-	const blueTable = sampleCurve(grade.curves.blue, PIXEL_TABLE_SAMPLES);
-	const masterTable = sampleCurve(grade.curves.master, PIXEL_TABLE_SAMPLES);
-	const masterMatrix = getWheelMatrix(grade.master);
-	const shadowsMatrix = getWheelMatrix(grade.shadows);
-	const midtonesMatrix = getWheelMatrix(grade.midtones);
-	const highlightsMatrix = getWheelMatrix(grade.highlights);
-	const shadowsStrength = grade.shadows.strength / 100;
-	const midtonesStrength = grade.midtones.strength / 100;
-	const highlightsStrength = grade.highlights.strength / 100;
+	let tables = gradeTableCache.get(grade);
+	if (!tables) {
+		tables = buildGradeTables(grade);
+		gradeTableCache.set(grade, tables);
+	}
+	const { lut, cubeLut, redTable, greenTable, blueTable, masterTable } = tables;
+	const {
+		masterMatrix,
+		shadowsMatrix,
+		midtonesMatrix,
+		highlightsMatrix,
+		shadowsStrength,
+		midtonesStrength,
+		highlightsStrength
+	} = tables;
 
 	for (let offset = 0; offset < data.length; offset += 4) {
+		if (skipTransparent && data[offset + 3] === 0) continue;
 		const originalRed = data[offset] / 255;
 		const originalGreen = data[offset + 1] / 255;
 		const originalBlue = data[offset + 2] / 255;

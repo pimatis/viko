@@ -72,6 +72,9 @@
 		canNormalizeAudio?: boolean;
 		normalizing?: boolean;
 		onNormalizeAudio?: (clipId: string) => void;
+		// linked A/V pair status; unlink breaks the sourceInstanceId pairing
+		linked?: boolean;
+		onUnlink?: () => void;
 	};
 
 	let {
@@ -88,6 +91,8 @@
 		matching = false,
 		canNormalizeAudio = false,
 		normalizing = false,
+		linked = false,
+		onUnlink = () => {},
 		onNormalizeAudio = () => {}
 	}: Props = $props();
 
@@ -417,10 +422,24 @@
 		<!-- clip header -->
 		<div class="border-b border-border px-3 py-2.5">
 			<div class="truncate text-xs font-semibold text-foreground">{clip.name}</div>
-			<div class="mt-0.5 text-[10px] text-muted-foreground tabular-nums">
-				{clip.duration.toFixed(1)}s
+			<div class="mt-0.5 flex items-center gap-2 text-[10px] text-muted-foreground tabular-nums">
+				<span>{clip.duration.toFixed(1)}s</span>
 				{#if clip.groupId}
-					<span class="ml-1.5 text-primary">- Grouped</span>
+					<span class="text-primary">- Grouped</span>
+				{/if}
+				{#if linked}
+					<span class="flex items-center gap-1 font-medium text-primary">
+						<span class="inline-block size-2.5 rounded-full border border-primary/60 bg-primary/15"
+						></span>
+						Linked A/V
+					</span>
+					<button
+						type="button"
+						onclick={onUnlink}
+						class="rounded-sm border border-border px-1.5 py-px text-[9px] font-medium text-muted-foreground transition-colors hover:border-destructive/50 hover:text-destructive"
+					>
+						Unlink
+					</button>
 				{/if}
 			</div>
 		</div>

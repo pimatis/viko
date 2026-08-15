@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
-	import { syncMedia, syncMediaVolume } from '$lib/editor/mediaSync';
+	import { syncMedia, syncMediaAudio } from '$lib/editor/mediaSync';
 	import {
 		applyChromaKey,
 		createChromaKeyGL,
@@ -20,6 +20,7 @@
 		reversed?: boolean;
 		playbackRate?: number;
 		volume?: number;
+		trackId?: string;
 		config: ChromaKeyState;
 	};
 
@@ -33,6 +34,7 @@
 		reversed = false,
 		playbackRate = 1,
 		volume = 1,
+		trackId,
 		config
 	}: Props = $props();
 
@@ -200,7 +202,7 @@
 			syncEveryTick,
 			reversed
 		}}
-		use:syncMediaVolume={volume}
+		use:syncMediaAudio={{ trackId: trackId ?? '', volume }}
 	>
 		<track kind="captions" />
 	</video>

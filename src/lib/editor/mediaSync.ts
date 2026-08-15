@@ -1,4 +1,5 @@
 import type { Action } from 'svelte/action';
+import { audioEngine } from '$lib/audio/engine';
 import { FRAME_RATE, roundToFrame } from './timeline';
 
 export type MediaSyncState = {
@@ -114,6 +115,30 @@ export const syncMedia: Action<HTMLMediaElement, MediaSyncState> = (node, state)
 			node.pause();
 			node.removeEventListener('loadedmetadata', handleLoadedMetadata);
 			node.removeEventListener('pause', handlePause);
+		}
+	};
+};
+
+export type MediaAudioState = {
+	trackId: string;
+	// effective clip-level gain (preview volume, clip volume, fades, ducking)
+	volume: number;
+};
+
+// route a media element's audio through the shared mixing engine so track
+// volume/pan from the Audio Mixer apply to preview playback
+// (createMediaElementSource can only run once per element, so elements that
+// use this action must never be routed through syncMediaVolume)
+export const syncMediaAudio: Action<HTMLMediaElement, MediaAudioState> = (node, state) => {
+	audioEngine.registerElement(node, state.trackId);
+	audioEngine.setElementVolume(node, state.volume);
+	return {
+		update(nextState: MediaAudioState) {
+			state = nextState;
+			audioEngine.setElementVolume(node, nextState.volume);
+		},
+		destroy() {
+			audioEngine.unregisterElement(node);
 		}
 	};
 };

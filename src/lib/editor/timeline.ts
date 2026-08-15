@@ -295,6 +295,15 @@ export type ClipInsertRequest = {
 	trackType: TrackType;
 	createTrack?: boolean;
 	trackName?: string;
+	// optional linked partner (video + audio) inserted atomically in the same
+	// commit; both sides share a sourceInstanceId so they stay in lockstep
+	linkedClips?: {
+		clips: Clip[];
+		trackType: TrackType;
+		targetTrackId?: string;
+		createTrack?: boolean;
+		trackName?: string;
+	};
 };
 
 export type Track = {
@@ -305,6 +314,9 @@ export type Track = {
 	clips: Clip[];
 	muted: boolean;
 	locked: boolean;
+	// mixer settings: volume 0..2 (1 = unity), pan -1..1 (0 = center)
+	volume: number;
+	pan: number;
 };
 
 export const FRAME_RATE = 30;
@@ -1027,6 +1039,62 @@ export function nudgeClips(
 		};
 	});
 	return changed ? nextTracks : tracks;
+}
+
+// ----- linked A/V clips -----
+// clips that share a sourceInstanceId form a linked set (a video clip and the
+// audio clip created alongside it). linking is used to keep matching video and
+// audio pieces in lockstep for selection, moves, razors and deletes.
+// only clips on a different track count as linked: same-track pieces that were
+// cut out of one insert share the instance id but are not an A/V pair.
+export function getLinkedClipIds(tracks: Track[], clipId: string): string[] {
+	const clipTrackIndex = tracks.findIndex((track) =>
+		track.clips.some((candidate) => candidate.id === clipId)
+	);
+	const clip = tracks[clipTrackIndex]?.clips.find((candidate) => candidate.id === clipId);
+	if (clipTrackIndex < 0 || !clip?.sourceInstanceId) return [];
+	const linkedIds: string[] = [];
+	for (let index = 0; index < tracks.length; index += 1) {
+		if (index === clipTrackIndex) continue;
+		for (const candidate of tracks[index].clips) {
+			if (candidate.sourceInstanceId === clip.sourceInstanceId) linkedIds.push(candidate.id);
+		}
+	}
+	return linkedIds;
+}
+
+export function hasLinkedClip(tracks: Track[], clipId: string): boolean {
+	return getLinkedClipIds(tracks, clipId).length > 0;
+}
+
+export function expandLinkedSelection(tracks: Track[], clipIds: string[]): string[] {
+	const expanded = new Set<string>();
+	for (const clipId of clipIds) {
+		expanded.add(clipId);
+		for (const linkedId of getLinkedClipIds(tracks, clipId)) expanded.add(linkedId);
+	}
+	return [...expanded];
+}
+
+// move a clip (and its group, if any) and nudge every linked partner by the
+// same delta so video and audio stay in lockstep when either side is dragged
+export function moveLinkedClips(
+	tracks: Track[],
+	clipId: string,
+	targetTrackId: string,
+	startTime: number,
+	timelineDuration: number
+): Track[] {
+	const sourceTrack = tracks.find((track) => track.clips.some((clip) => clip.id === clipId));
+	const clip = sourceTrack?.clips.find((candidate) => candidate.id === clipId);
+	if (!clip) return tracks;
+	const deltaFrames = Math.round((startTime - clip.startTime) * FRAME_RATE);
+	const base = clip.groupId
+		? moveGroupedClips(tracks, clipId, deltaFrames / FRAME_RATE, timelineDuration)
+		: moveClip(tracks, clipId, targetTrackId, startTime, timelineDuration);
+	const linkedIds = getLinkedClipIds(tracks, clipId);
+	if (linkedIds.length === 0 || deltaFrames === 0) return base;
+	return nudgeClips(base, linkedIds, deltaFrames, timelineDuration);
 }
 
 export function updateClipProperty(

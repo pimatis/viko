@@ -41,7 +41,8 @@
 		type Track,
 		type VisualTransform
 	} from '$lib/editor/timeline';
-	import { syncMedia, syncMediaVolume } from '$lib/editor/mediaSync';
+	import { syncMedia, syncMediaAudio } from '$lib/editor/mediaSync';
+	import { audioEngine } from '$lib/audio/engine';
 	import { collectDuckSources, getDuckingFactorAtTime, isDuckSource } from '$lib/audio/ducking';
 	import { isChromaKeyActive } from '$lib/chroma';
 	import ChromaKeyLayer from './ChromaKeyLayer.svelte';
@@ -244,6 +245,10 @@
 		for (const layer of compositedLayers) {
 			const key = `${layer.trackId}-${layer.clip.sourceInstanceId ?? layer.clip.id}-${index}`;
 			index += 1;
+			// audio-track clips render no visual band; their audio is routed
+			// through the audio layers below (a linked A/V pair would otherwise
+			// double the audio via the band's own media element)
+			if (layer.trackType === 'audio') continue;
 			if (layer.trackType !== 'adjustment') {
 				root.push({ key, kind: 'layer', layer });
 				continue;
@@ -257,7 +262,34 @@
 		}
 		return root;
 	});
-	const audioLayers = $derived(activeLayers.filter((layer) => layer.asset?.kind === 'audio'));
+	// a linked A/V pair routes audio through the audio-track clip: audio layers
+	// include audio-kind assets AND audio-track clips holding a video asset
+	const audioLayers = $derived(
+		activeLayers.filter(
+			(layer) => layer.asset && (layer.asset.kind === 'audio' || layer.trackType === 'audio')
+		)
+	);
+	// visual clips whose audio comes from a linked audio-track clip; their own
+	// media element is muted so the pair does not double the audio
+	const linkedAudioVisualClipIds = $derived.by(() => {
+		const audioInstanceIds = new Set<string>();
+		for (const track of tracks) {
+			if (track.type !== 'audio') continue;
+			for (const clip of track.clips) {
+				if (clip.sourceInstanceId) audioInstanceIds.add(clip.sourceInstanceId);
+			}
+		}
+		const visualIds = new Set<string>();
+		for (const track of tracks) {
+			if (track.type === 'audio') continue;
+			for (const clip of track.clips) {
+				if (clip.sourceInstanceId && audioInstanceIds.has(clip.sourceInstanceId)) {
+					visualIds.add(clip.id);
+				}
+			}
+		}
+		return visualIds;
+	});
 	const duckSources = $derived(collectDuckSources(tracks));
 	const currentTimeLabel = $derived(formatPlayerTime(currentTime));
 	const durationLabel = $derived(formatPlayerTime(duration));
@@ -941,11 +973,15 @@
 													mediaKind={layer.asset.kind}
 													sourceTime={layer.sourceTime}
 													{isPlaying}
-													muted={previewMuted || layer.trackMuted || layer.clip.reversed === true}
+													muted={previewMuted ||
+														layer.trackMuted ||
+														layer.clip.reversed === true ||
+														linkedAudioVisualClipIds.has(layer.clip.id)}
 													syncEveryTick={layer.clip.reversed === true || steppingBackward}
 													reversed={layer.clip.reversed === true || steppingBackward}
 													playbackRate={getLayerPlaybackRate(layer)}
 													volume={getLayerEffectiveVolume(layer, visualState)}
+													trackId={layer.trackId}
 													grade={layer.clip.colorGrade!}
 													chromaConfig={chromaActive
 														? getClipChromaKeyState(layer.clip, layer.clipTime)
@@ -957,11 +993,15 @@
 													mediaKind={layer.asset.kind}
 													sourceTime={layer.sourceTime}
 													{isPlaying}
-													muted={previewMuted || layer.trackMuted || layer.clip.reversed === true}
+													muted={previewMuted ||
+														layer.trackMuted ||
+														layer.clip.reversed === true ||
+														linkedAudioVisualClipIds.has(layer.clip.id)}
 													syncEveryTick={layer.clip.reversed === true || steppingBackward}
 													reversed={layer.clip.reversed === true || steppingBackward}
 													playbackRate={getLayerPlaybackRate(layer)}
 													volume={getLayerEffectiveVolume(layer, visualState)}
+													trackId={layer.trackId}
 													config={getClipChromaKeyState(layer.clip, layer.clipTime)}
 												/>
 											{:else if layer.asset?.kind === 'video'}
@@ -973,22 +1013,30 @@
 													use:syncMedia={{
 														time: layer.sourceTime,
 														playing: isPlaying,
-														muted: previewMuted || layer.trackMuted || layer.clip.reversed === true,
+														muted:
+															previewMuted ||
+															layer.trackMuted ||
+															layer.clip.reversed === true ||
+															linkedAudioVisualClipIds.has(layer.clip.id),
 														playbackRate: getLayerPlaybackRate(layer),
 														syncEveryTick: layer.clip.reversed === true || steppingBackward,
 														reversed: layer.clip.reversed === true || steppingBackward
 													}}
-													use:syncMediaVolume={getLayerEffectiveVolume(layer, visualState)}
+													use:syncMediaAudio={{
+														trackId: layer.trackId,
+														volume: getLayerEffectiveVolume(layer, visualState)
+													}}
 												>
 													<track kind="captions" />
 												</video>
-												{#if layer.clip.reversed === true}
+												{#if layer.clip.reversed === true && !linkedAudioVisualClipIds.has(layer.clip.id)}
 													<ReverseAudioLayer
 														src={layer.asset.src}
 														sourceTime={layer.sourceTime}
 														{isPlaying}
 														rate={getLayerPlaybackRate(layer)}
 														volume={getLayerEffectiveVolume(layer, visualState)}
+														trackId={layer.trackId}
 													/>
 												{/if}
 											{:else}
@@ -1060,6 +1108,7 @@
 								{isPlaying}
 								rate={getLayerPlaybackRate(layer)}
 								volume={getLayerEffectiveVolume(layer, audioState)}
+								trackId={layer.trackId}
 							/>
 						{:else}
 							<audio
@@ -1072,7 +1121,10 @@
 									playbackRate: getLayerPlaybackRate(layer),
 									syncEveryTick: false
 								}}
-								use:syncMediaVolume={getLayerEffectiveVolume(layer, audioState)}
+								use:syncMediaAudio={{
+									trackId: layer.trackId,
+									volume: getLayerEffectiveVolume(layer, audioState)
+								}}
 							></audio>
 						{/if}
 					{/if}

@@ -31,7 +31,9 @@ export async function analyzeClipLoudness(
 		speed: clip.speed ?? 1,
 		reversed: clip.reversed === true,
 		assetId: clip.assetId,
-		assetSrc: asset.src
+		assetSrc: asset.src,
+		trackVolume: 1,
+		trackPan: 0
 	};
 	const { buffers } = await decodeAudioAssets([loaded]);
 	const buffer = buffers.get(clip.assetId);

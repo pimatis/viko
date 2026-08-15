@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
-	import { syncMedia, syncMediaVolume } from '$lib/editor/mediaSync';
+	import { syncMedia, syncMediaAudio } from '$lib/editor/mediaSync';
 	import { applyColorGrade, type ColorGrade } from '$lib/grading';
 	import { applyChromaKey } from '$lib/chroma';
 	import { FRAME_RATE, type ChromaKeyState } from '$lib/editor/timeline';
@@ -15,6 +15,7 @@
 		reversed?: boolean;
 		playbackRate?: number;
 		volume?: number;
+		trackId?: string;
 		grade: ColorGrade;
 		chromaConfig?: ChromaKeyState | null;
 	};
@@ -29,6 +30,7 @@
 		reversed = false,
 		playbackRate = 1,
 		volume = 1,
+		trackId,
 		grade,
 		chromaConfig = null
 	}: Props = $props();
@@ -199,7 +201,7 @@
 			syncEveryTick,
 			reversed
 		}}
-		use:syncMediaVolume={volume}
+		use:syncMediaAudio={{ trackId: trackId ?? '', volume }}
 	>
 		<track kind="captions" />
 	</video>

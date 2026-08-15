@@ -4,9 +4,11 @@
 	import { clampTimelineZoom, TIMELINE_ZOOM_STEP, type EditorTool } from '$lib/editor/toolbar';
 	import { cn } from '$lib/utils';
 	import {
+		AudioLines,
 		Hand,
 		Magnet,
 		Minus,
+		MonitorPlay,
 		MousePointer2,
 		Plus,
 		Scissors,
@@ -31,6 +33,10 @@
 		onSetInPoint?: () => void;
 		onSetOutPoint?: () => void;
 		onClearInOutPoints?: () => void;
+		sourceMonitorOpen?: boolean;
+		onSourceMonitorToggle?: () => void;
+		mixerOpen?: boolean;
+		onMixerToggle?: () => void;
 	};
 
 	type ToolOption = {
@@ -49,7 +55,11 @@
 		hasInOutPoints = false,
 		onSetInPoint = () => {},
 		onSetOutPoint = () => {},
-		onClearInOutPoints = () => {}
+		onClearInOutPoints = () => {},
+		sourceMonitorOpen = false,
+		onSourceMonitorToggle = () => {},
+		mixerOpen = false,
+		onMixerToggle = () => {}
 	}: Props = $props();
 
 	const tools: ToolOption[] = [
@@ -198,6 +208,53 @@
 			</Tooltip.Root>
 
 			<div class="mx-1 h-4 w-px bg-border"></div>
+
+			<Tooltip.Root>
+				<Tooltip.Trigger>
+					{#snippet child({ props })}
+						<Button
+							{...props}
+							variant="ghost"
+							size="icon-xs"
+							class={cn(
+								'text-muted-foreground transition-all',
+								sourceMonitorOpen
+									? 'bg-secondary text-foreground shadow-sm'
+									: 'hover:text-foreground'
+							)}
+							onclick={() => {
+								if (sourceMonitorOpen) sound.pause();
+								onSourceMonitorToggle();
+							}}
+							aria-label="Toggle source monitor"
+						>
+							<MonitorPlay class="size-4" />
+						</Button>
+					{/snippet}
+				</Tooltip.Trigger>
+				<Tooltip.Content>Source monitor</Tooltip.Content>
+			</Tooltip.Root>
+
+			<Tooltip.Root>
+				<Tooltip.Trigger>
+					{#snippet child({ props })}
+						<Button
+							{...props}
+							variant="ghost"
+							size="icon-xs"
+							class={cn(
+								'text-muted-foreground transition-all',
+								mixerOpen ? 'bg-secondary text-foreground shadow-sm' : 'hover:text-foreground'
+							)}
+							onclick={onMixerToggle}
+							aria-label="Toggle audio mixer"
+						>
+							<AudioLines class="size-4" />
+						</Button>
+					{/snippet}
+				</Tooltip.Trigger>
+				<Tooltip.Content>Audio mixer</Tooltip.Content>
+			</Tooltip.Root>
 
 			<Tooltip.Root>
 				<Tooltip.Trigger>

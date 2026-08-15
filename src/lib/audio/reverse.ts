@@ -1,5 +1,7 @@
 // Reverse (backward) audio playback for reversed timeline clips.
 //
+import { audioEngine } from './engine';
+
 // HTMLMediaElement cannot play backward (no negative playbackRate), so a
 // reversed clip's video/audio element is muted and stepped frame by frame.
 // This module decodes the asset's audio track once, mirrors the samples, and
@@ -19,6 +21,9 @@ export type ReverseAudioState = {
 	rate: number;
 	// effective gain in 0..1 (preview volume, clip volume, fades, ducking)
 	volume: number;
+	// timeline track the clip lives on; the buffer routes through the shared
+	// mixing engine so track volume/pan apply to reversed audio too
+	trackId: string;
 };
 
 export type ReverseAudioPlayer = {
@@ -81,7 +86,10 @@ async function getReversedBuffer(src: string): Promise<AudioBuffer | null> {
 	bufferCache.set(src, promise);
 	return promise;
 }
-export async function createReverseAudioPlayer(src: string): Promise<ReverseAudioPlayer | null> {
+export async function createReverseAudioPlayer(
+	src: string,
+	trackId: string
+): Promise<ReverseAudioPlayer | null> {
 	const decoded = await getReversedBuffer(src);
 	if (!decoded) return null;
 	// explicit non-null copy so closures keep a stable AudioBuffer reference
@@ -90,7 +98,7 @@ export async function createReverseAudioPlayer(src: string): Promise<ReverseAudi
 	const ctx = getContext();
 	const gain = ctx.createGain();
 	gain.gain.value = 0;
-	gain.connect(ctx.destination);
+	gain.connect(audioEngine.getTrackInput(trackId));
 
 	let source: AudioBufferSourceNode | null = null;
 	let startCtxTime = 0;

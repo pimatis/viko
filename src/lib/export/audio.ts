@@ -22,11 +22,24 @@ export type LoadedAudioClip = {
 	reversed: boolean;
 	assetId: string;
 	assetSrc: string;
+	// track-level mix (Audio Mixer panel) applied during the offline mixdown
+	trackVolume: number;
+	trackPan: number;
 };
 
 export function collectAudioClips(tracks: Track[], mediaAssets: MediaAsset[]): LoadedAudioClip[] {
 	const clips: LoadedAudioClip[] = [];
 	const assetsById = new Map(mediaAssets.map((asset) => [asset.id, asset]));
+
+	// linked A/V pairs route audio through the audio-track clip; skip the video
+	// clip's own element so the pair does not get mixed twice
+	const audioInstanceIds = new Set<string>();
+	for (const track of tracks) {
+		if (track.type !== 'audio') continue;
+		for (const clip of track.clips) {
+			if (clip.sourceInstanceId) audioInstanceIds.add(clip.sourceInstanceId);
+		}
+	}
 
 	for (const track of tracks) {
 		if (track.muted) continue;
@@ -36,6 +49,12 @@ export function collectAudioClips(tracks: Track[], mediaAssets: MediaAsset[]): L
 			if (!asset) continue;
 			if (asset.kind !== 'video' && asset.kind !== 'audio') continue;
 			if (asset.playbackSupported === false) continue;
+			if (
+				track.type !== 'audio' &&
+				clip.sourceInstanceId &&
+				audioInstanceIds.has(clip.sourceInstanceId)
+			)
+				continue;
 			clips.push({
 				clip,
 				trackId: track.id,
@@ -45,7 +64,9 @@ export function collectAudioClips(tracks: Track[], mediaAssets: MediaAsset[]): L
 				speed: clip.speed ?? 1,
 				reversed: clip.reversed === true,
 				assetId: clip.assetId,
-				assetSrc: asset.src
+				assetSrc: asset.src,
+				trackVolume: track.volume ?? 1,
+				trackPan: track.pan ?? 0
 			});
 		}
 	}
@@ -220,7 +241,16 @@ export async function mixAudioOffline(
 		);
 		gain.gain.setValueCurveAtTime(volumeCurve, exportOffset, visibleDuration);
 
-		source.connect(gain).connect(ctx.destination);
+		// track-level mix from the Audio Mixer panel: fixed gain + stereo balance.
+		// StereoPannerNode applies the same equal-power law as the live engine, so
+		// preview and export stay in sync (mono clips pan fully, stereo clips
+		// behave as a balance control).
+		const trackGain = ctx.createGain();
+		trackGain.gain.value = Math.min(2, Math.max(0, loadedClip.trackVolume));
+		const panner = ctx.createStereoPanner();
+		panner.pan.value = Math.min(1, Math.max(-1, loadedClip.trackPan));
+
+		source.connect(gain).connect(trackGain).connect(panner).connect(ctx.destination);
 		source.start(exportOffset, sourceOffset, visibleDuration * loadedClip.speed);
 	}
 
