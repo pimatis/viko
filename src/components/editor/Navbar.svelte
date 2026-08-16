@@ -32,7 +32,8 @@
 		Loader2,
 		Check,
 		Camera,
-		FileImage
+		FileImage,
+		Settings
 	} from '@lucide/svelte';
 
 	type Props = {
@@ -45,6 +46,8 @@
 		autoSaveEnabled?: boolean;
 		exportQuality?: ExportQuality;
 		exportResolution?: ExportResolution | null;
+		frameRate?: number;
+		onOpenProjectSettings?: () => void;
 		isExporting?: boolean;
 		isCapturingFrame?: boolean;
 		exportQualities?: ExportQuality[];
@@ -86,6 +89,8 @@
 		isCapturingFrame = false,
 		exportQualities = [],
 		exportResolution = null,
+		frameRate = 30,
+		onOpenProjectSettings = () => {},
 		onExportQualityChange = () => {},
 		onExport = () => {},
 		onCaptureFrame = () => {},
@@ -637,7 +642,7 @@
 							size="xs"
 							class="min-w-12 justify-center text-xs text-muted-foreground tabular-nums hover:text-foreground"
 						>
-							{zoom}%
+							{Math.round(zoom)}%
 						</Button>
 					{/snippet}
 				</Popover.Trigger>
@@ -698,6 +703,25 @@
 			{#if autoSaveEnabled && !isSaving}
 				<span class="hidden text-[10px] text-muted-foreground tabular-nums sm:inline">Auto</span>
 			{/if}
+
+			<!-- project settings (frame rate + resolution) -->
+			<Tooltip.Root>
+				<Tooltip.Trigger>
+					{#snippet child({ props })}
+						<Button
+							{...props}
+							variant="ghost"
+							size="xs"
+							class="shrink-0 gap-1 px-2.5 text-muted-foreground hover:text-foreground"
+							onclick={onOpenProjectSettings}
+						>
+							<Settings class="size-3.5" />
+							<span class="tabular-nums">{frameRate} fps</span>
+						</Button>
+					{/snippet}
+				</Tooltip.Trigger>
+				<Tooltip.Content>Project settings (frame rate, resolution)</Tooltip.Content>
+			</Tooltip.Root>
 
 			<!-- export quality selector -->
 			<DropdownMenu.Root>

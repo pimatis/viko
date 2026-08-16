@@ -13,6 +13,12 @@ export type SidebarTab =
 
 export type MediaKind = 'video' | 'audio' | 'image';
 
+export type MediaFolder = {
+	id: string;
+	name: string;
+	createdAt: number;
+};
+
 export type MediaAsset = {
 	id: string;
 	name: string;
@@ -25,6 +31,8 @@ export type MediaAsset = {
 	height: number | null;
 	playbackSupported: boolean | null;
 	createdAt: number;
+	// id of the folder/collection this asset belongs to, or null for the root
+	folderId: string | null;
 };
 
 export type ResourceKind = Exclude<SidebarTab, 'media' | 'audio'>;
@@ -173,7 +181,11 @@ function normalizeFileName(name: string): string {
 	return normalizedName.slice(0, 255) || 'Untitled asset';
 }
 
-export function importMediaFiles(files: File[], existingAssets: MediaAsset[]): MediaImportResult {
+export function importMediaFiles(
+	files: File[],
+	existingAssets: MediaAsset[],
+	targetFolderId: string | null = null
+): MediaImportResult {
 	const accepted: MediaAsset[] = [];
 	const rejected: MediaImportResult['rejected'] = [];
 	const existingKeys = new Set(
@@ -211,7 +223,8 @@ export function importMediaFiles(files: File[], existingAssets: MediaAsset[]): M
 			width: null,
 			height: null,
 			playbackSupported: kind === 'image' ? true : null,
-			createdAt: Date.now()
+			createdAt: Date.now(),
+			folderId: targetFolderId
 		});
 	}
 

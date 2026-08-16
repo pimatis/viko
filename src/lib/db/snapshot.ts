@@ -6,6 +6,7 @@ export function createProjectSnapshot(document: ProjectDocument): ProjectDocumen
 		...document,
 		tracks: cloneTracks(document.tracks),
 		mediaAssets: document.mediaAssets.map((asset) => ({ ...asset })),
+		mediaFolders: (document.mediaFolders ?? []).map((folder) => ({ ...folder })),
 		markers: (document.markers ?? []).map((marker) => ({ ...marker })),
 		// rebuild nested objects as plain values — Svelte state proxies are not
 		// structured-cloneable and would make IndexedDB puts throw DataCloneError

@@ -36,7 +36,12 @@
 		type ProjectDocument,
 		type ProjectVersion
 	} from '$lib/db';
-	import { STICKER_PRESETS, type EditorResource, type MediaAsset } from '$lib/editor/sidebar';
+	import {
+		STICKER_PRESETS,
+		type EditorResource,
+		type MediaAsset,
+		type MediaFolder
+	} from '$lib/editor/sidebar';
 	import { inspectMediaAsset } from '$lib/editor/sidebar';
 	import { clampDuckAmountDb } from '$lib/audio/ducking';
 	import { normalizeClipAudio } from '$lib/audio/normalize';
@@ -85,6 +90,7 @@
 		Workflow,
 		Captions,
 		AudioLines,
+		Settings,
 		// effect preset icons
 		Vibrate,
 		Zap,
@@ -118,7 +124,10 @@
 		clampBezierControlPoints,
 		clampKeyframeValue,
 		DEFAULT_BEZIER_POINTS,
+		DEFAULT_FRAME_RATE,
 		FRAME_RATE,
+		FRAME_RATE_OPTIONS,
+		setProjectFrameRate,
 		getClipKeyframeValue,
 		getLinkedClipIds,
 		isBlendMode,
@@ -180,7 +189,11 @@
 		type ExportQuality,
 		type ExportProgress
 	} from '$lib/export';
-	import { PLAYER_ASPECT_RATIO_PRESETS, type PlayerAspectRatioMode } from '$lib/editor/player';
+	import {
+		PLAYER_ASPECT_RATIOS,
+		PLAYER_ASPECT_RATIO_PRESETS,
+		type PlayerAspectRatioMode
+	} from '$lib/editor/player';
 
 	let projectName = $state('Untitled Project');
 	let zoom = $state(100);
@@ -194,6 +207,7 @@
 	let isPlaying = $state(false);
 	let selectedClipId = $state<string | null>(null);
 	let mediaAssets = $state<MediaAsset[]>([]);
+	let mediaFolders = $state<MediaFolder[]>([]);
 	let tracks = $state<Track[]>([]);
 	let activeTool = $state<EditorTool>('select');
 	let snappingEnabled = $state(true);
@@ -244,6 +258,8 @@
 	let sourceMonitorRootEl = $state<HTMLElement | null>(null);
 	let mixerOpen = $state(false);
 	let mixerMasterVolume = $state(1);
+	let frameRate = $state(DEFAULT_FRAME_RATE);
+	let projectSettingsOpen = $state(false);
 
 	const sortedVersions = $derived([...versions].sort((a, b) => b.createdAt - a.createdAt));
 	const exportResolution = $derived(getExportResolution(playerAspectRatio, exportQuality));
@@ -442,11 +458,21 @@
 	const DEFAULT_ASSET_DURATION = 5;
 	const PROJECT_FORMAT = 'viko-project';
 	const PROJECT_VERSION = 1;
+
+	const PROJECT_RESOLUTIONS = [
+		{ id: '4k', label: '4K UHD', width: 3840, height: 2160 },
+		{ id: '1080p', label: '1080p HD', width: 1920, height: 1080 },
+		{ id: '720p', label: '720p HD', width: 1280, height: 720 },
+		{ id: '480p', label: '480p SD', width: 854, height: 480 },
+		{ id: 'vertical', label: 'Vertical 1080x1920', width: 1080, height: 1920 },
+		{ id: 'square', label: 'Square 1080x1080', width: 1080, height: 1080 }
+	] as const;
 	const MAX_VERSIONS = 20;
 	const MAX_PROJECT_TIME = 24 * 60 * 60;
 	const MAX_PROJECT_TRACKS = 200;
 	const MAX_TRACK_CLIPS = 10_000;
 	const MAX_PROJECT_ASSETS = 5_000;
+	const MAX_PROJECT_FOLDERS = 200;
 	const SAFE_COLOR_PATTERN = /^#[0-9a-f]{6}([0-9a-f]{2})?$/i;
 	const editorResources: EditorResource[] = [
 		...TEXT_PRESETS,
@@ -515,6 +541,16 @@
 			icon: Plus,
 			run: () => {
 				newProjectDialogOpen = true;
+			}
+		},
+		{
+			id: 'palette-project-settings',
+			label: 'Project Settings',
+			keywords: 'fps frame rate resolution settings project',
+			group: 'File',
+			icon: Settings,
+			run: () => {
+				projectSettingsOpen = true;
 			}
 		},
 		{
@@ -1351,6 +1387,12 @@
 		autoSaveBlocked = false;
 	}
 
+	function handleMediaFoldersChange(folders: MediaFolder[]) {
+		mediaFolders = folders;
+		isSaved = false;
+		autoSaveBlocked = false;
+	}
+
 	function handleTracksChange(nextTracks: Track[]) {
 		tracks = nextTracks;
 		isSaved = false;
@@ -1857,6 +1899,17 @@
 					: null,
 			playbackSupported:
 				typeof value.playbackSupported === 'boolean' ? value.playbackSupported : null,
+			createdAt: typeof value.createdAt === 'number' ? value.createdAt : Date.now(),
+			folderId: typeof value.folderId === 'string' ? value.folderId : null
+		};
+	}
+
+	function sanitizeMediaFolder(value: unknown): MediaFolder | null {
+		if (!isRecord(value)) return null;
+		if (typeof value.id !== 'string' || typeof value.name !== 'string') return null;
+		return {
+			id: value.id.slice(0, 200),
+			name: value.name.trim().slice(0, 120) || 'Untitled folder',
 			createdAt: typeof value.createdAt === 'number' ? value.createdAt : Date.now()
 		};
 	}
@@ -1868,6 +1921,14 @@
 		if (typeof value.name !== 'string' || !Array.isArray(value.tracks)) return null;
 		const rawAssets = Array.isArray(value.mediaAssets) ? value.mediaAssets : [];
 		const rawMarkers = Array.isArray(value.markers) ? value.markers : [];
+		const rawFolders = Array.isArray(value.mediaFolders) ? value.mediaFolders : [];
+		const mediaFolders = rawFolders
+			.slice(0, MAX_PROJECT_FOLDERS)
+			.flatMap((folder) => {
+				const sanitized = sanitizeMediaFolder(folder);
+				return sanitized ? [sanitized] : [];
+			});
+		const folderIds = new Set(mediaFolders.map((folder) => folder.id));
 		return {
 			format: PROJECT_FORMAT,
 			version: PROJECT_VERSION,
@@ -1878,8 +1939,14 @@
 			}),
 			mediaAssets: rawAssets.slice(0, MAX_PROJECT_ASSETS).flatMap((asset) => {
 				const sanitized = sanitizeMediaAsset(asset);
-				return sanitized ? [sanitized] : [];
+				if (!sanitized) return [];
+				// drop folder references that point to a folder missing from the document
+				if (sanitized.folderId && !folderIds.has(sanitized.folderId)) {
+					return [{ ...sanitized, folderId: null }];
+				}
+				return [sanitized];
 			}),
+			mediaFolders,
 			markers: rawMarkers.slice(0, 200).flatMap((marker) => {
 				if (!isRecord(marker) || typeof marker.id !== 'string' || typeof marker.time !== 'number')
 					return [];
@@ -1901,6 +1968,11 @@
 					(PLAYER_ASPECT_RATIO_PRESETS as readonly string[]).includes(value.aspectRatioMode))
 					? (value.aspectRatioMode as PlayerAspectRatioMode)
 					: 'auto',
+			frameRate:
+				typeof value.frameRate === 'number' &&
+				(FRAME_RATE_OPTIONS as readonly number[]).includes(value.frameRate)
+					? value.frameRate
+					: DEFAULT_FRAME_RATE,
 			updatedAt: typeof value.updatedAt === 'number' ? value.updatedAt : Date.now()
 		};
 	}
@@ -1912,9 +1984,11 @@
 			name: projectName,
 			tracks,
 			mediaAssets,
+			mediaFolders,
 			markers,
 			aspectRatio: { width: playerAspectRatio.width, height: playerAspectRatio.height },
 			aspectRatioMode,
+			frameRate,
 			updatedAt: Date.now()
 		};
 	}
@@ -2151,6 +2225,7 @@
 		projectName = document.name;
 		tracks = document.tracks;
 		mediaAssets = document.mediaAssets;
+		mediaFolders = document.mediaFolders ?? [];
 		markers = document.markers ?? [];
 		inOutPoints = { in: null, out: null };
 		currentTime = 0;
@@ -2160,6 +2235,8 @@
 			? { width: document.aspectRatio.width, height: document.aspectRatio.height }
 			: { width: 16, height: 9 };
 		aspectRatioMode = document.aspectRatioMode ?? 'auto';
+		frameRate = document.frameRate ?? DEFAULT_FRAME_RATE;
+		setProjectFrameRate(frameRate);
 		historyEpoch += 1;
 		isSaved = true;
 	}
@@ -2207,6 +2284,7 @@
 		projectName = 'Untitled Project';
 		tracks = [];
 		mediaAssets = [];
+		mediaFolders = [];
 		markers = [];
 		inOutPoints = { in: null, out: null };
 		currentTime = 0;
@@ -2214,12 +2292,45 @@
 		selectedClipId = null;
 		playerAspectRatio = { width: 16, height: 9 };
 		aspectRatioMode = 'auto';
+		frameRate = DEFAULT_FRAME_RATE;
+		setProjectFrameRate(DEFAULT_FRAME_RATE);
 		historyEpoch += 1;
 		isSaved = true;
 		autoSaveEnabled = false;
 		newProjectDialogOpen = false;
 		projectNotice = 'New project created';
 		void clearProject();
+	}
+
+	function applyProjectFrameRate(fps: number) {
+		if (fps === frameRate) return;
+		frameRate = fps;
+		setProjectFrameRate(fps);
+		isSaved = false;
+		autoSaveBlocked = false;
+	}
+
+	function applyProjectResolution(width: number, height: number) {
+		if (playerAspectRatio.width === width && playerAspectRatio.height === height) return;
+		playerAspectRatio = { width, height };
+		// pin the player aspect mode when the resolution matches a preset ratio
+		// (presets are abstract ratios like 16:9, so compare by cross-multiplied
+		// dimensions), so the preview window and project resolution always agree
+		let mode: PlayerAspectRatioMode = 'auto';
+		for (const presetId of PLAYER_ASPECT_RATIO_PRESETS) {
+			const preset = PLAYER_ASPECT_RATIOS[presetId];
+			if (Math.abs(width * preset.height - height * preset.width) <= 2) {
+				mode = presetId;
+				break;
+			}
+		}
+		aspectRatioMode = mode;
+		// default the export quality to the project resolution's short edge
+		const shortEdge = Math.min(width, height);
+		const quality = EXPORT_QUALITIES.find((q) => q.height === shortEdge);
+		if (quality) exportQuality = quality;
+		isSaved = false;
+		autoSaveBlocked = false;
 	}
 
 	async function restoreVersion(version: ProjectVersion) {
@@ -2543,17 +2654,21 @@
 		onUndo={() => requestTimelineCommand('undo')}
 		onRedo={() => requestTimelineCommand('redo')}
 		onToggleSidebar={toggleSidebar}
+		{frameRate}
+		onOpenProjectSettings={() => (projectSettingsOpen = true)}
 	/>
 
 	<div class="flex min-h-0 flex-1">
 		<Sidebar
 			bind:open={sidebarOpen}
 			bind:mediaAssets
+			bind:mediaFolders
 			{usedAssetIds}
 			resources={editorResources}
 			captionPresets={CAPTION_PRESETS}
 			onToggle={toggleSidebar}
 			onMediaAssetsChange={handleMediaAssetsChange}
+			onMediaFoldersChange={handleMediaFoldersChange}
 			onAssetApply={(asset) => dropMediaAsset(asset.id, '', currentTime, true)}
 			onAssetSelect={openSourceMonitor}
 			onResourceApply={applyResource}
@@ -2734,6 +2849,56 @@
 			<Dialog.Footer>
 				<Button variant="ghost" onclick={() => (newProjectDialogOpen = false)}>Cancel</Button>
 				<Button variant="destructive" onclick={createNewProject}>Create project</Button>
+			</Dialog.Footer>
+		</Dialog.Content>
+	</Dialog.Root>
+
+	<Dialog.Root bind:open={projectSettingsOpen}>
+		<Dialog.Content class="sm:max-w-md">
+			<Dialog.Header>
+				<Dialog.Title>Project Settings</Dialog.Title>
+				<Dialog.Description>
+					Frame rate and resolution apply to the whole project — preview, timecode and export.
+				</Dialog.Description>
+			</Dialog.Header>
+			<div class="space-y-5 py-1">
+				<div>
+					<span class="mb-2 block text-xs font-medium text-foreground">Frame rate</span>
+					<div class="grid grid-cols-5 gap-1.5">
+						{#each FRAME_RATE_OPTIONS as fps (fps)}
+							<Button
+								variant={fps === frameRate ? 'default' : 'outline'}
+								size="sm"
+								class="tabular-nums"
+								onclick={() => applyProjectFrameRate(fps)}
+							>
+								{fps} fps
+							</Button>
+						{/each}
+					</div>
+				</div>
+				<div>
+					<span class="mb-2 block text-xs font-medium text-foreground">Resolution</span>
+					<div class="grid grid-cols-2 gap-1.5">
+						{#each PROJECT_RESOLUTIONS as res (res.id)}
+							<Button
+								variant={playerAspectRatio.width === res.width &&
+								playerAspectRatio.height === res.height
+									? 'default'
+									: 'outline'}
+								size="sm"
+								class="justify-between"
+								onclick={() => applyProjectResolution(res.width, res.height)}
+							>
+								<span>{res.label}</span>
+								<span class="text-[10px] tabular-nums opacity-70">{res.width}×{res.height}</span>
+							</Button>
+						{/each}
+					</div>
+				</div>
+			</div>
+			<Dialog.Footer>
+				<Button variant="ghost" onclick={() => (projectSettingsOpen = false)}>Close</Button>
 			</Dialog.Footer>
 		</Dialog.Content>
 	</Dialog.Root>

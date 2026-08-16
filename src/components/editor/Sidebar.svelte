@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onDestroy } from 'svelte';
 	import { Button } from '$lib/components/ui/button';
+	import * as ContextMenu from '$lib/components/ui/context-menu';
 	import * as Tooltip from '$lib/components/ui/tooltip';
 	import * as Select from '$lib/components/ui/select';
 	import { Textarea } from '$lib/components/ui/textarea';
@@ -17,6 +18,7 @@
 		SIDEBAR_RESOURCE_MIME,
 		type EditorResource,
 		type MediaAsset,
+		type MediaFolder,
 		type SidebarTab
 	} from '$lib/editor/sidebar';
 	import type { CaptionGeneratePayload, CaptionPreset } from '$lib/editor/captions';
@@ -24,14 +26,20 @@
 	import { cn } from '$lib/utils';
 	import {
 		Captions,
+		ChevronRight,
 		CirclePlus,
 		Film,
+		Folder,
+		FolderInput,
+		FolderOpen,
+		FolderPlus,
 		ImagePlus,
 		ListFilter,
 		Loader2,
 		Mic,
 		Music,
 		Pause,
+		Pencil,
 		Play,
 		Search,
 		Shuffle,
@@ -48,11 +56,13 @@
 	type Props = {
 		open?: boolean;
 		mediaAssets?: MediaAsset[];
+		mediaFolders?: MediaFolder[];
 		usedAssetIds?: string[];
 		resources?: EditorResource[];
 		captionPresets?: CaptionPreset[];
 		onToggle?: () => void;
 		onMediaAssetsChange?: (assets: MediaAsset[]) => void;
+		onMediaFoldersChange?: (folders: MediaFolder[]) => void;
 		onResourceApply?: (resource: EditorResource) => void;
 		onAssetApply?: (asset: MediaAsset) => void;
 		onAssetSelect?: (assetId: string | null) => void;
@@ -67,11 +77,13 @@
 	let {
 		open = $bindable(true),
 		mediaAssets = $bindable([] as MediaAsset[]),
+		mediaFolders = $bindable([] as MediaFolder[]),
 		usedAssetIds = [],
 		resources = [],
 		captionPresets = [],
 		onToggle = () => {},
 		onMediaAssetsChange = () => {},
+		onMediaFoldersChange = () => {},
 		onResourceApply = () => {},
 		onAssetApply = () => {},
 		onAssetSelect = () => {},
@@ -86,6 +98,16 @@
 	let activeTab = $state<SidebarTab>('media');
 	let searchQuery = $state('');
 	let selectedAssetId = $state<string | null>(null);
+	let selectedFolderId = $state<string | null>(null);
+	let expandedFolderIds = $state<string[]>([]);
+	let hoveredAssetId = $state<string | null>(null);
+	let draggingAssetId = $state<string | null>(null);
+	let dragOverFolderId = $state<string | null>(null);
+	let dragOverRoot = $state(false);
+	let renamingAssetId = $state<string | null>(null);
+	let renamingFolderId = $state<string | null>(null);
+	let renameValue = $state('');
+	let renameInputEl = $state<HTMLInputElement | null>(null);
 	let playingAssetId = $state<string | null>(null);
 	let previewAudio = $state<HTMLAudioElement | null>(null);
 	let fileInput = $state<HTMLInputElement | null>(null);
@@ -110,12 +132,30 @@
 	];
 
 	const activeTabLabel = $derived(tabs.find((tab) => tab.id === activeTab)?.label ?? '');
-	const visibleMediaAssets = $derived(
+	const matchingMediaAssets = $derived(
 		filterByQuery(
 			mediaAssets.filter((asset) => asset.kind !== 'audio'),
 			searchQuery
 		)
 	);
+	const folderIds = $derived(mediaFolders.map((folder) => folder.id));
+	// assets in a folder that no longer exists (or was never assigned) count as root
+	const rootMediaAssets = $derived(
+		matchingMediaAssets.filter((asset) => !asset.folderId || !folderIds.includes(asset.folderId))
+	);
+	const isSearching = $derived(searchQuery.trim().length > 0);
+	const visibleFolders = $derived(
+		isSearching
+			? mediaFolders.filter((folder) => {
+					const query = searchQuery.trim().toLocaleLowerCase();
+					if (folder.name.toLocaleLowerCase().includes(query)) return true;
+					return matchingMediaAssets.some((asset) => asset.folderId === folder.id);
+				})
+			: mediaFolders
+	);
+	function getFolderAssets(folderId: string): MediaAsset[] {
+		return matchingMediaAssets.filter((asset) => asset.folderId === folderId);
+	}
 	const visibleAudioAssets = $derived(
 		filterByQuery(
 			mediaAssets.filter((asset) => asset.kind === 'audio'),
@@ -176,11 +216,11 @@
 		onAssetSelect(assetId);
 	}
 
-	async function processFiles(files: File[]) {
+	async function processFiles(files: File[], targetFolderId: string | null = selectedFolderId) {
 		if (files.length === 0) return;
 		sound.drop();
 		try {
-			const result = importMediaFiles(files, mediaAssets);
+			const result = importMediaFiles(files, mediaAssets, targetFolderId);
 			if (result.accepted.length > 0) {
 				ownedAssetIds = [...ownedAssetIds, ...result.accepted.map((asset) => asset.id)];
 				mediaAssets = [...mediaAssets, ...result.accepted];
@@ -224,13 +264,202 @@
 
 	function handleAssetDragStart(event: DragEvent, asset: MediaAsset) {
 		if (!event.dataTransfer) return;
-		event.dataTransfer.effectAllowed = 'copy';
+		draggingAssetId = asset.id;
+		// copyMove: the timeline accepts a copy (insert), folders accept a move (reorganize)
+		event.dataTransfer.effectAllowed = 'copyMove';
 		event.dataTransfer.setData(
 			SIDEBAR_ASSET_MIME,
 			JSON.stringify({ id: asset.id, kind: asset.kind })
 		);
 		event.dataTransfer.setData('text/plain', asset.name);
 	}
+
+	function handleAssetDragEnd() {
+		draggingAssetId = null;
+		dragOverFolderId = null;
+		dragOverRoot = false;
+	}
+
+	function isSidebarAssetDrag(event: DragEvent): boolean {
+		return event.dataTransfer?.types.includes(SIDEBAR_ASSET_MIME) ?? Boolean(draggingAssetId);
+	}
+
+	function handleFolderDragOver(event: DragEvent, folderId: string) {
+		const isFileDrag = event.dataTransfer?.types.includes('Files') ?? false;
+		if (!isFileDrag && !isSidebarAssetDrag(event)) return;
+		event.preventDefault();
+		event.dataTransfer!.dropEffect = isFileDrag ? 'copy' : 'move';
+		dragOverFolderId = folderId;
+	}
+
+	function handleFolderDragLeave(event: DragEvent) {
+		if (event.currentTarget !== event.target) return;
+		dragOverFolderId = null;
+	}
+
+	function handleFolderDrop(event: DragEvent, folderId: string) {
+		event.preventDefault();
+		dragOverFolderId = null;
+		const files = Array.from(event.dataTransfer?.files ?? []);
+		if (files.length > 0) {
+			void processFiles(files, folderId);
+			return;
+		}
+		const assetId = getDraggedAssetId(event);
+		if (assetId) moveAssetToFolder(assetId, folderId);
+	}
+
+	function handleRootDragOver(event: DragEvent) {
+		const isFileDrag = event.dataTransfer?.types.includes('Files') ?? false;
+		if (!isFileDrag && !isSidebarAssetDrag(event)) return;
+		event.preventDefault();
+		event.dataTransfer!.dropEffect = isFileDrag ? 'copy' : 'move';
+		dragOverRoot = true;
+	}
+
+	function handleRootDragLeave(event: DragEvent) {
+		if (event.currentTarget !== event.target) return;
+		dragOverRoot = false;
+	}
+
+	function handleRootDrop(event: DragEvent) {
+		event.preventDefault();
+		dragOverRoot = false;
+		const files = Array.from(event.dataTransfer?.files ?? []);
+		if (files.length > 0) {
+			void processFiles(files, null);
+			return;
+		}
+		const assetId = getDraggedAssetId(event);
+		if (assetId) moveAssetToFolder(assetId, null);
+	}
+
+	function getDraggedAssetId(event: DragEvent): string | null {
+		const data = event.dataTransfer?.getData(SIDEBAR_ASSET_MIME);
+		if (!data) return draggingAssetId;
+		try {
+			const parsed = JSON.parse(data);
+			return typeof parsed.id === 'string' ? parsed.id : null;
+		} catch {
+			return null;
+		}
+	}
+
+	function moveAssetToFolder(assetId: string, folderId: string | null) {
+		const asset = mediaAssets.find((candidate) => candidate.id === assetId);
+		if (!asset || asset.folderId === folderId) return;
+		sound.drop();
+		mediaAssets = mediaAssets.map((candidate) =>
+			candidate.id === assetId ? { ...candidate, folderId } : candidate
+		);
+		onMediaAssetsChange(mediaAssets);
+	}
+
+	function createFolder() {
+		sound.select();
+		const id = crypto.randomUUID();
+		const folder: MediaFolder = { id, name: 'New folder', createdAt: Date.now() };
+		mediaFolders = [...mediaFolders, folder];
+		onMediaFoldersChange(mediaFolders);
+		selectedFolderId = id;
+		if (!expandedFolderIds.includes(id)) expandedFolderIds = [...expandedFolderIds, id];
+		startFolderRename(id);
+	}
+
+	function toggleFolder(folderId: string) {
+		sound.select();
+		expandedFolderIds = expandedFolderIds.includes(folderId)
+			? expandedFolderIds.filter((id) => id !== folderId)
+			: [...expandedFolderIds, folderId];
+	}
+
+	function selectFolder(folderId: string) {
+		sound.select();
+		selectedFolderId = folderId;
+		if (!expandedFolderIds.includes(folderId)) {
+			expandedFolderIds = [...expandedFolderIds, folderId];
+		}
+	}
+
+	function startFolderRename(folderId: string) {
+		const folder = mediaFolders.find((candidate) => candidate.id === folderId);
+		if (!folder) return;
+		sound.select();
+		renamingFolderId = folderId;
+		renamingAssetId = null;
+		renameValue = folder.name;
+	}
+
+	function startAssetRename(assetId: string) {
+		const asset = mediaAssets.find((candidate) => candidate.id === assetId);
+		if (!asset) return;
+		sound.select();
+		renamingAssetId = assetId;
+		renamingFolderId = null;
+		renameValue = asset.name;
+	}
+
+	function commitFolderRename() {
+		if (!renamingFolderId) return;
+		const name = renameValue.trim().slice(0, 120) || 'Untitled folder';
+		mediaFolders = mediaFolders.map((folder) =>
+			folder.id === renamingFolderId ? { ...folder, name } : folder
+		);
+		onMediaFoldersChange(mediaFolders);
+		renamingFolderId = null;
+	}
+
+	function commitAssetRename() {
+		if (!renamingAssetId) return;
+		const name = renameValue.trim().slice(0, 255) || 'Untitled asset';
+		mediaAssets = mediaAssets.map((asset) =>
+			asset.id === renamingAssetId ? { ...asset, name } : asset
+		);
+		onMediaAssetsChange(mediaAssets);
+		renamingAssetId = null;
+	}
+
+	function commitActiveRename() {
+		if (renamingFolderId !== null) commitFolderRename();
+		else if (renamingAssetId !== null) commitAssetRename();
+	}
+
+	function cancelActiveRename() {
+		renamingFolderId = null;
+		renamingAssetId = null;
+	}
+
+	function handleRenameKeydown(event: KeyboardEvent) {
+		if (event.key === 'Enter') {
+			event.preventDefault();
+			commitActiveRename();
+		} else if (event.key === 'Escape') {
+			event.preventDefault();
+			cancelActiveRename();
+		}
+	}
+
+	function deleteFolder(folderId: string) {
+		sound.delete();
+		// assets inside the folder move back to the root instead of being deleted
+		mediaAssets = mediaAssets.map((asset) =>
+			asset.folderId === folderId ? { ...asset, folderId: null } : asset
+		);
+		onMediaAssetsChange(mediaAssets);
+		mediaFolders = mediaFolders.filter((folder) => folder.id !== folderId);
+		onMediaFoldersChange(mediaFolders);
+		expandedFolderIds = expandedFolderIds.filter((id) => id !== folderId);
+		if (selectedFolderId === folderId) selectedFolderId = null;
+		if (renamingFolderId === folderId) renamingFolderId = null;
+	}
+
+	$effect(() => {
+		if (renamingAssetId === null && renamingFolderId === null) return;
+		const input = renameInputEl;
+		if (!input) return;
+		input.focus();
+		input.select();
+	});
 
 	function handleResourceDragStart(event: DragEvent, resource: EditorResource) {
 		if (!event.dataTransfer) return;
@@ -322,6 +551,60 @@
 	class="hidden"
 	onchange={handleFileChange}
 />
+
+{#snippet assetMenuContent(asset: MediaAsset, withFolderMove: boolean)}
+	<ContextMenu.Content>
+		<ContextMenu.Item
+			onclick={() => {
+				sound.drop();
+				onAssetApply(asset);
+			}}
+		>
+			<CirclePlus class="size-4" />
+			Add to timeline
+		</ContextMenu.Item>
+		<ContextMenu.Item onclick={() => startAssetRename(asset.id)}>
+			<Pencil class="size-4" />
+			Rename
+		</ContextMenu.Item>
+		{#if withFolderMove}
+			<ContextMenu.Separator />
+			<ContextMenu.Sub>
+				<ContextMenu.SubTrigger class="gap-2">
+					<FolderInput class="size-4" />
+					Move to folder
+				</ContextMenu.SubTrigger>
+				<ContextMenu.SubContent>
+					{#each mediaFolders as folder (folder.id)}
+						<ContextMenu.Item
+							onclick={() => moveAssetToFolder(asset.id, folder.id)}
+							disabled={asset.folderId === folder.id}
+						>
+							<Folder class="size-4" />
+							{folder.name}
+						</ContextMenu.Item>
+					{/each}
+					<ContextMenu.Item
+						onclick={() => moveAssetToFolder(asset.id, null)}
+						disabled={!asset.folderId}
+					>
+						<Film class="size-4" />
+						Project media
+					</ContextMenu.Item>
+				</ContextMenu.SubContent>
+			</ContextMenu.Sub>
+		{/if}
+		<ContextMenu.Separator />
+		<ContextMenu.Item
+			variant="destructive"
+			onclick={() => removeAsset(asset)}
+			disabled={usedAssetIds.includes(asset.id)}
+		>
+			<Trash2 class="size-4" />
+			Delete
+		</ContextMenu.Item>
+	</ContextMenu.Content>
+{/snippet}
 
 {#if open}
 	<div
@@ -425,75 +708,276 @@
 						<span class="text-[11px] font-medium text-muted-foreground">Import media</span>
 					</button>
 
-					{#if visibleMediaAssets.length > 0}
-						<div class="flex items-center gap-2">
-							<span class="text-[10px] font-bold tracking-wider text-muted-foreground uppercase">
-								Project media
-							</span>
-							<div class="h-px flex-1 bg-sidebar-border"></div>
-						</div>
-
-						<div class="grid grid-cols-2 gap-1.5">
-							{#each visibleMediaAssets as asset (asset.id)}
-								<div
-									role="group"
-									draggable="true"
-									ondragstart={(event) => handleAssetDragStart(event, asset)}
-									class={cn(
-										'group relative overflow-hidden rounded-md border bg-sidebar-accent transition-all',
-										selectedAssetId === asset.id
-											? 'border-ring shadow-sm'
-											: 'border-transparent hover:border-sidebar-border'
-									)}
-								>
-									<button
-										class="flex w-full flex-col text-left"
-										onclick={() => selectAsset(asset.id)}
-										ondblclick={() => {
-											sound.drop();
-											onAssetApply(asset);
-										}}
+					{#snippet assetTile(asset: MediaAsset)}
+						<ContextMenu.Root>
+							<ContextMenu.Trigger oncontextmenu={() => selectAsset(asset.id)}>
+								{#snippet child({ props })}
+									<div
+										{...props}
+										role="group"
+										draggable="true"
+										ondragstart={(event) => handleAssetDragStart(event, asset)}
+										ondragend={handleAssetDragEnd}
+										onmouseenter={() => (hoveredAssetId = asset.id)}
+										onmouseleave={() => (hoveredAssetId = null)}
+										class={cn(
+											'group relative overflow-hidden rounded-md border bg-sidebar-accent transition-all',
+											selectedAssetId === asset.id
+												? 'border-ring shadow-sm'
+												: 'border-transparent hover:border-sidebar-border'
+										)}
 									>
-										<div
-											class="flex aspect-video w-full items-center justify-center overflow-hidden bg-muted/40"
+										<button
+											class="flex w-full flex-col text-left"
+											onclick={() => selectAsset(asset.id)}
+											ondblclick={() => {
+												sound.drop();
+												onAssetApply(asset);
+											}}
 										>
-											{#if asset.kind === 'image'}
-												<img src={asset.src} alt={asset.name} class="size-full object-cover" />
+											<div
+												class="flex aspect-video w-full items-center justify-center overflow-hidden bg-muted/40"
+											>
+												{#if asset.kind === 'image'}
+													<img
+														src={asset.src}
+														alt={asset.name}
+														class="size-full object-cover transition-transform duration-200 group-hover:scale-105"
+													/>
+												{:else if asset.kind === 'video' && hoveredAssetId === asset.id}
+													<video
+														src={asset.src}
+														class="size-full object-cover"
+														autoplay
+														muted
+														loop
+														playsinline
+														preload="metadata"
+														disablepictureinpicture
+														controlslist="nodownload noremoteplayback"
+													></video>
+												{:else}
+													<Film class="size-5 text-muted-foreground/40" />
+												{/if}
+											</div>
+										</button>
+										<div class="flex w-full items-center gap-1 px-1.5 py-1.5">
+											{#if renamingAssetId === asset.id}
+												<input
+													bind:this={renameInputEl}
+													bind:value={renameValue}
+													onkeydown={handleRenameKeydown}
+													onblur={commitAssetRename}
+													maxlength={255}
+													class="h-6 min-w-0 flex-1 rounded border border-ring bg-background px-1 text-[10px] text-foreground outline-none"
+												/>
 											{:else}
-												<Film class="size-5 text-muted-foreground/40" />
+												<span
+													class="min-w-0 flex-1 truncate text-[10px] font-medium text-sidebar-foreground"
+												>
+													{asset.name}
+												</span>
+												<button
+													class="hidden size-4 shrink-0 items-center justify-center rounded-sm text-muted-foreground group-hover:flex hover:text-foreground"
+													onclick={() => startAssetRename(asset.id)}
+													aria-label={`Rename ${asset.name}`}
+												>
+													<Pencil class="size-3" />
+												</button>
+												<span class="shrink-0 text-[9px] text-muted-foreground tabular-nums">
+													{formatAssetDuration(asset.duration) || formatAssetSize(asset.size)}
+												</span>
 											{/if}
 										</div>
-										<div class="flex w-full items-center gap-1 px-1.5 py-1.5">
-											<span
-												class="min-w-0 flex-1 truncate text-[10px] font-medium text-sidebar-foreground"
-											>
-												{asset.name}
-											</span>
-											<span class="shrink-0 text-[9px] text-muted-foreground tabular-nums">
-												{formatAssetDuration(asset.duration) || formatAssetSize(asset.size)}
-											</span>
-										</div>
-									</button>
-									<button
-										class="absolute top-1 left-1 hidden size-5 items-center justify-center rounded-md bg-background/90 text-muted-foreground shadow-sm group-hover:flex hover:text-foreground"
-										onclick={() => {
-											sound.drop();
-											onAssetApply(asset);
-										}}
-										aria-label={`Add ${asset.name} to timeline`}
-									>
-										<CirclePlus class="size-3" />
-									</button>
-									<button
-										class="absolute top-1 right-1 hidden size-5 items-center justify-center rounded-md bg-background/90 text-muted-foreground shadow-sm group-hover:flex hover:text-destructive"
-										onclick={() => removeAsset(asset)}
-										aria-label={`Remove ${asset.name}`}
-									>
-										<Trash2 class="size-3" />
-									</button>
-								</div>
-							{/each}
+										<button
+											class="absolute top-1 left-1 hidden size-5 items-center justify-center rounded-md bg-background/90 text-muted-foreground shadow-sm group-hover:flex hover:text-foreground"
+											onclick={() => {
+												sound.drop();
+												onAssetApply(asset);
+											}}
+											aria-label={`Add ${asset.name} to timeline`}
+										>
+											<CirclePlus class="size-3" />
+										</button>
+										<button
+											class="absolute top-1 right-1 hidden size-5 items-center justify-center rounded-md bg-background/90 text-muted-foreground shadow-sm group-hover:flex hover:text-destructive"
+											onclick={() => removeAsset(asset)}
+											aria-label={`Remove ${asset.name}`}
+										>
+											<Trash2 class="size-3" />
+										</button>
+									</div>
+								{/snippet}
+							</ContextMenu.Trigger>
+							{@render assetMenuContent(asset, true)}
+						</ContextMenu.Root>
+					{/snippet}
+
+					{#if isSearching}
+						{#if matchingMediaAssets.length > 0}
+							<div class="grid grid-cols-2 gap-1.5">
+								{#each matchingMediaAssets as asset (asset.id)}
+									{@render assetTile(asset)}
+								{/each}
+							</div>
+						{/if}
+					{:else}
+						<!-- collections -->
+						<div class="flex items-center gap-2">
+							<span class="text-[10px] font-bold tracking-wider text-muted-foreground uppercase">
+								Collections
+							</span>
+							<div class="h-px flex-1 bg-sidebar-border"></div>
+							<button
+								onclick={createFolder}
+								class="flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"
+								aria-label="New folder"
+								title="New folder"
+							>
+								<FolderPlus class="size-3.5" />
+							</button>
 						</div>
+						<div class="flex flex-col gap-0.5">
+							{#each visibleFolders as folder (folder.id)}
+								{@const expanded = expandedFolderIds.includes(folder.id)}
+								{@const folderAssetCount = getFolderAssets(folder.id).length}
+								<ContextMenu.Root>
+									<ContextMenu.Trigger oncontextmenu={() => selectFolder(folder.id)}>
+										{#snippet child({ props })}
+											<div
+												{...props}
+												role="group"
+												class={cn(
+													'group/folder rounded-md border transition-colors',
+													dragOverFolderId === folder.id
+														? 'border-primary bg-sidebar-accent'
+														: 'border-transparent',
+													selectedFolderId === folder.id && 'bg-sidebar-accent/70'
+												)}
+												ondragover={(event) => handleFolderDragOver(event, folder.id)}
+												ondragleave={handleFolderDragLeave}
+												ondrop={(event) => handleFolderDrop(event, folder.id)}
+											>
+												<div class="flex items-center gap-1 px-1 py-1">
+													<button
+														onclick={() => toggleFolder(folder.id)}
+														class="flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"
+														aria-label={expanded
+															? `Collapse ${folder.name}`
+															: `Expand ${folder.name}`}
+													>
+														<ChevronRight
+															class={cn('size-3 transition-transform', expanded && 'rotate-90')}
+														/>
+													</button>
+													{#if expanded}
+														<FolderOpen class="size-3.5 shrink-0 text-muted-foreground" />
+													{:else}
+														<Folder class="size-3.5 shrink-0 text-muted-foreground" />
+													{/if}
+													{#if renamingFolderId === folder.id}
+														<input
+															bind:this={renameInputEl}
+															bind:value={renameValue}
+															onkeydown={handleRenameKeydown}
+															onblur={commitFolderRename}
+															maxlength={120}
+															class="h-6 min-w-0 flex-1 rounded border border-ring bg-background px-1 text-[11px] text-foreground outline-none"
+														/>
+													{:else}
+														<button
+															onclick={() => selectFolder(folder.id)}
+															class="min-w-0 flex-1 truncate text-left text-[11px] font-medium text-sidebar-foreground transition-colors hover:text-foreground"
+														>
+															{folder.name}
+														</button>
+														<span class="shrink-0 text-[9px] text-muted-foreground tabular-nums">
+															{folderAssetCount}
+														</span>
+														<button
+															onclick={() => startFolderRename(folder.id)}
+															class="hidden size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors group-hover/folder:flex hover:bg-sidebar-accent hover:text-foreground"
+															aria-label={`Rename ${folder.name}`}
+														>
+															<Pencil class="size-3" />
+														</button>
+														<button
+															onclick={() => deleteFolder(folder.id)}
+															class="hidden size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors group-hover/folder:flex hover:bg-sidebar-accent hover:text-destructive"
+															aria-label={`Delete ${folder.name}`}
+														>
+															<Trash2 class="size-3" />
+														</button>
+													{/if}
+												</div>
+												{#if expanded}
+													<div class="grid grid-cols-2 gap-1.5 pt-1 pr-1.5 pb-1.5 pl-6">
+														{#each getFolderAssets(folder.id) as asset (asset.id)}
+															{@render assetTile(asset)}
+														{/each}
+														{#if folderAssetCount === 0}
+															<div class="col-span-2 px-1 text-[10px] text-muted-foreground">
+																Empty folder - drop media here
+															</div>
+														{/if}
+													</div>
+												{/if}
+											</div>
+										{/snippet}
+									</ContextMenu.Trigger>
+									<ContextMenu.Content>
+										<ContextMenu.Item onclick={() => startFolderRename(folder.id)}>
+											<Pencil class="size-4" />
+											Rename
+										</ContextMenu.Item>
+										<ContextMenu.Separator />
+										<ContextMenu.Item variant="destructive" onclick={() => deleteFolder(folder.id)}>
+											<Trash2 class="size-4" />
+											Delete
+										</ContextMenu.Item>
+									</ContextMenu.Content>
+								</ContextMenu.Root>
+							{/each}
+							{#if visibleFolders.length === 0}
+								<div class="px-1 text-[10px] text-muted-foreground">
+									No collections yet. Import media or create a folder.
+								</div>
+							{/if}
+						</div>
+
+						{#if mediaFolders.length > 0 || rootMediaAssets.length > 0}
+							<div
+								role="group"
+								class={cn(
+									'flex items-center gap-2 rounded-md px-1',
+									dragOverRoot && 'ring-1 ring-primary'
+								)}
+								ondragover={handleRootDragOver}
+								ondragleave={handleRootDragLeave}
+								ondrop={handleRootDrop}
+							>
+								<span class="text-[10px] font-bold tracking-wider text-muted-foreground uppercase">
+									Project media
+								</span>
+								<div class="h-px flex-1 bg-sidebar-border"></div>
+								{#if rootMediaAssets.length > 0}
+									<span class="shrink-0 text-[9px] text-muted-foreground tabular-nums">
+										{rootMediaAssets.length}
+									</span>
+								{/if}
+							</div>
+							{#if rootMediaAssets.length > 0}
+								<div class="grid grid-cols-2 gap-1.5">
+									{#each rootMediaAssets as asset (asset.id)}
+										{@render assetTile(asset)}
+									{/each}
+								</div>
+							{:else}
+								<div class="px-1 text-[10px] text-muted-foreground">
+									Drop media here to move it out of folders
+								</div>
+							{/if}
+						{/if}
 					{/if}
 				</div>
 			{:else if activeTab === 'audio'}
@@ -509,58 +993,84 @@
 					</Button>
 					<div class="flex flex-col gap-0.5">
 						{#each visibleAudioAssets as asset (asset.id)}
-							<div
-								role="group"
-								draggable="true"
-								ondragstart={(event) => handleAssetDragStart(event, asset)}
-								class={cn(
-									'group flex items-center gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-sidebar-accent',
-									selectedAssetId === asset.id && 'bg-sidebar-accent'
-								)}
-							>
-								<button
-									class="flex size-7 shrink-0 items-center justify-center rounded-md bg-sidebar-accent transition-colors group-hover:bg-background"
-									onclick={() => toggleAudioPreview(asset)}
-								>
-									{#if playingAssetId === asset.id}
-										<Pause class="size-3.5 text-foreground" />
-									{:else}
-										<Play class="size-3.5 text-muted-foreground" />
-									{/if}
-								</button>
-								<button
-									class="min-w-0 flex-1 text-left"
-									onclick={() => selectAsset(asset.id)}
-									ondblclick={() => {
-										sound.drop();
-										onAssetApply(asset);
-									}}
-								>
-									<div class="truncate text-[11px] font-medium text-sidebar-foreground">
-										{asset.name}
-									</div>
-									<div class="truncate text-[10px] text-muted-foreground tabular-nums">
-										{formatAssetSize(asset.size)}
-									</div>
-								</button>
-								<button
-									class="p-1 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:text-foreground"
-									onclick={() => {
-										sound.drop();
-										onAssetApply(asset);
-									}}
-									aria-label={`Add ${asset.name} to timeline`}
-								>
-									<CirclePlus class="size-3.5" />
-								</button>
-								<button
-									class="p-1 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:text-destructive"
-									onclick={() => removeAsset(asset)}
-									aria-label={`Remove ${asset.name}`}
-								>
-									<X class="size-3.5" />
-								</button>
-							</div>
+							<ContextMenu.Root>
+								<ContextMenu.Trigger oncontextmenu={() => selectAsset(asset.id)}>
+									{#snippet child({ props })}
+										<div
+											{...props}
+											role="group"
+											draggable="true"
+											ondragstart={(event) => handleAssetDragStart(event, asset)}
+											class={cn(
+												'group flex items-center gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-sidebar-accent',
+												selectedAssetId === asset.id && 'bg-sidebar-accent'
+											)}
+										>
+											<button
+												class="flex size-7 shrink-0 items-center justify-center rounded-md bg-sidebar-accent transition-colors group-hover:bg-background"
+												onclick={() => toggleAudioPreview(asset)}
+											>
+												{#if playingAssetId === asset.id}
+													<Pause class="size-3.5 text-foreground" />
+												{:else}
+													<Play class="size-3.5 text-muted-foreground" />
+												{/if}
+											</button>
+											{#if renamingAssetId === asset.id}
+												<input
+													bind:this={renameInputEl}
+													bind:value={renameValue}
+													onkeydown={handleRenameKeydown}
+													onblur={commitAssetRename}
+													maxlength={255}
+													class="h-7 min-w-0 flex-1 rounded border border-ring bg-background px-1.5 text-[11px] text-foreground outline-none"
+												/>
+											{:else}
+												<button
+													class="min-w-0 flex-1 text-left"
+													onclick={() => selectAsset(asset.id)}
+													ondblclick={() => {
+														sound.drop();
+														onAssetApply(asset);
+													}}
+												>
+													<div class="truncate text-[11px] font-medium text-sidebar-foreground">
+														{asset.name}
+													</div>
+													<div class="truncate text-[10px] text-muted-foreground tabular-nums">
+														{formatAssetSize(asset.size)}
+													</div>
+												</button>
+												<button
+													class="p-1 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:text-foreground"
+													onclick={() => startAssetRename(asset.id)}
+													aria-label={`Rename ${asset.name}`}
+												>
+													<Pencil class="size-3" />
+												</button>
+											{/if}
+											<button
+												class="p-1 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:text-foreground"
+												onclick={() => {
+													sound.drop();
+													onAssetApply(asset);
+												}}
+												aria-label={`Add ${asset.name} to timeline`}
+											>
+												<CirclePlus class="size-3.5" />
+											</button>
+											<button
+												class="p-1 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:text-destructive"
+												onclick={() => removeAsset(asset)}
+												aria-label={`Remove ${asset.name}`}
+											>
+												<X class="size-3.5" />
+											</button>
+										</div>
+									{/snippet}
+								</ContextMenu.Trigger>
+								{@render assetMenuContent(asset, false)}
+							</ContextMenu.Root>
 						{/each}
 					</div>
 				</div>

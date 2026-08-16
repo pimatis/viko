@@ -330,7 +330,7 @@
 			onclick={resetZoom}
 			title="Reset timeline zoom"
 		>
-			{zoom}%
+			{Math.round(zoom)}%
 		</button>
 		<Button
 			variant="ghost"

@@ -319,7 +319,22 @@ export type Track = {
 	pan: number;
 };
 
-export const FRAME_RATE = 30;
+export const DEFAULT_FRAME_RATE = 30;
+
+// project frame rate. Kept as a live module binding so every consumer (frame
+// rounding, timecode, nudge, export muxing, playback stepping) reads the
+// current project value without threading it through every call site. Set via
+// setProjectFrameRate when a project loads or its settings change.
+export let FRAME_RATE = DEFAULT_FRAME_RATE;
+
+export const FRAME_RATE_OPTIONS = [24, 25, 30, 50, 60] as const;
+export type FrameRateOption = (typeof FRAME_RATE_OPTIONS)[number];
+
+export function setProjectFrameRate(fps: number): void {
+	const safe = Number.isFinite(fps) && fps > 0 ? fps : DEFAULT_FRAME_RATE;
+	if (safe === FRAME_RATE) return;
+	FRAME_RATE = safe;
+}
 
 export function roundToFrame(time: number): number {
 	return Math.round(Math.max(0, time) * FRAME_RATE) / FRAME_RATE;

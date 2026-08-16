@@ -121,11 +121,13 @@ type RenderTransition = {
 	state: ClipTransitionVisualState;
 };
 
-const PROGRESS_UPDATE_INTERVAL_FRAMES = Math.max(1, Math.round(FRAME_RATE));
+// FRAME_RATE is a live project setting (24/25/30/50/60), so every derived
+// value must be read at call time instead of frozen at module load
 const SEEK_TIMEOUT_MS = 3000;
 const MICROSECONDS_PER_SECOND = 1_000_000;
-const FRAME_DURATION_US = Math.round(MICROSECONDS_PER_SECOND / FRAME_RATE);
-const CHUNK_FRAME_COUNT = FRAME_RATE * 5;
+const progressUpdateIntervalFrames = () => Math.max(1, Math.round(FRAME_RATE));
+const frameDurationUs = () => Math.round(MICROSECONDS_PER_SECOND / FRAME_RATE);
+const chunkFrameCount = () => FRAME_RATE * 5;
 const AUDIO_CHUNK_SAMPLES = 16384;
 const AUDIO_BITRATE = 192_000;
 
@@ -444,11 +446,12 @@ async function encodeVideoChunks(
 	});
 	encoder.configure(config);
 
-	const chunkCount = Math.ceil(totalFrames / CHUNK_FRAME_COUNT);
+	const chunkFrames = chunkFrameCount();
+	const chunkCount = Math.ceil(totalFrames / chunkFrames);
 
 	for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
-		const startFrame = chunkIndex * CHUNK_FRAME_COUNT;
-		const endFrame = Math.min(totalFrames, startFrame + CHUNK_FRAME_COUNT);
+		const startFrame = chunkIndex * chunkFrames;
+		const endFrame = Math.min(totalFrames, startFrame + chunkFrames);
 
 		for (let frame = startFrame; frame < endFrame; frame++) {
 			const currentTime = startOffset + frame / FRAME_RATE;
@@ -456,8 +459,8 @@ async function encodeVideoChunks(
 			renderFrame(canvas, clips, currentTime);
 
 			const videoFrame = new VideoFrame(canvas, {
-				timestamp: frame * FRAME_DURATION_US,
-				duration: FRAME_DURATION_US
+				timestamp: frame * frameDurationUs(),
+				duration: frameDurationUs()
 			});
 			encoder.encode(videoFrame, { keyFrame: frame === startFrame });
 			videoFrame.close();
@@ -481,7 +484,7 @@ async function encodeVideoChunks(
 			} else if ((frame + 1) % 30 === 0) {
 				await new Promise((resolve) => setTimeout(resolve, 0));
 			}
-			if ((frame + 1) % PROGRESS_UPDATE_INTERVAL_FRAMES === 0 || frame === totalFrames - 1) {
+			if ((frame + 1) % progressUpdateIntervalFrames() === 0 || frame === totalFrames - 1) {
 				onProgress?.({
 					phase: 'rendering',
 					frame: frame + 1,
@@ -1223,7 +1226,7 @@ async function recordCanvasToWebM(
 			nextFrameTime = performance.now();
 		}
 
-		if (frame % PROGRESS_UPDATE_INTERVAL_FRAMES === 0 || frame === totalFrames - 1) {
+		if (frame % progressUpdateIntervalFrames() === 0 || frame === totalFrames - 1) {
 			onProgress?.({
 				phase: 'rendering',
 				frame: frame + 1,

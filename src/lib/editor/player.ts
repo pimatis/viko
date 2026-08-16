@@ -1,6 +1,6 @@
 import type { MediaAsset } from './sidebar';
 import type { Clip, Track, TrackType, VisualTransform } from './timeline';
-import { getClipSourceTime } from './timeline';
+import { FRAME_RATE, getClipSourceTime } from './timeline';
 import { getClipPairTransitionProgress, type TransitionRole } from '$lib/effects';
 
 export type PlayerAspectRatio = { width: number; height: number };
@@ -232,7 +232,7 @@ export function formatPlayerTime(seconds: number): string {
 	const hours = Math.floor(safeSeconds / 3600);
 	const minutes = Math.floor((safeSeconds % 3600) / 60);
 	const wholeSeconds = Math.floor(safeSeconds % 60);
-	const frames = Math.floor((safeSeconds % 1) * 30);
+	const frames = Math.floor((safeSeconds % 1) * FRAME_RATE);
 	return [hours, minutes, wholeSeconds, frames]
 		.map((part) => String(part).padStart(2, '0'))
 		.join(':');

@@ -443,7 +443,8 @@
 	const TRACK_HEIGHT = 48;
 	const RULER_HEIGHT = 28;
 	const HEADER_WIDTH = 128;
-	const PLAYBACK_FRAME_INTERVAL_MS = 1000 / FRAME_RATE;
+	// read at call time: FRAME_RATE is a live project setting
+	const playbackFrameIntervalMs = () => 1000 / FRAME_RATE;
 	const DRAG_THRESHOLD_PX = 3;
 	const AUTO_SCROLL_EDGE_PX = 28;
 	const AUTO_SCROLL_STEP_PX = 12;
@@ -1213,7 +1214,7 @@
 			return;
 		}
 		const elapsedMs = timestamp - lastPlaybackTimestamp;
-		if (elapsedMs < PLAYBACK_FRAME_INTERVAL_MS) {
+		if (elapsedMs < playbackFrameIntervalMs()) {
 			playbackFrame = requestAnimationFrame(updatePlayback);
 			return;
 		}
@@ -1358,8 +1359,10 @@
 			Math.min(duration, (clientX - rect.left + scrollContainer.scrollLeft) / pixelsPerSecond)
 		);
 
-		// Exponential scaling keeps the gesture smooth and direction-agnostic
-		const nextZoom = clampTimelineZoom(zoom * Math.exp(-event.deltaY * 0.01));
+		// Exponential scaling keeps the gesture smooth and direction-agnostic.
+		// Round to a whole percent so the stored zoom (and every UI readout that
+		// renders `zoom%`) never shows long float tails like 70.65843620492187%.
+		const nextZoom = clampTimelineZoom(Math.round(zoom * Math.exp(-event.deltaY * 0.01)));
 		if (nextZoom === zoom) return;
 		zoom = nextZoom;
 
@@ -2851,7 +2854,7 @@
 			<span
 				class="min-w-[32px] cursor-default text-center text-[10px] font-medium text-muted-foreground tabular-nums hover:text-foreground"
 			>
-				{zoom}%
+				{Math.round(zoom)}%
 			</span>
 			<Tooltip.Provider delayDuration={400}>
 				<Tooltip.Root>
