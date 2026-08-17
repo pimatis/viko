@@ -630,7 +630,7 @@
 	onblur={() => finishVisualDrag()}
 />
 
-<section bind:this={playerRoot} class="isolate flex h-full min-h-0 min-w-0 flex-1 flex-col bg-card">
+<section bind:this={playerRoot} data-guide-target="player" class="isolate flex h-full min-h-0 min-w-0 flex-1 flex-col bg-card">
 	<!-- top control bar -->
 	<div
 		class="relative z-20 flex h-10 shrink-0 items-center justify-end gap-1.5 border-b border-border bg-card px-2.5"

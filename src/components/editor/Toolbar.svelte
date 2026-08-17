@@ -125,7 +125,7 @@
 
 <svelte:window onkeydown={handleKeydown} />
 
-<div class="flex h-10 shrink-0 items-center gap-1 border-b border-border bg-card px-2.5">
+<div data-guide-target="toolbar" class="flex h-10 shrink-0 items-center gap-1 border-b border-border bg-card px-2.5">
 	<!-- tool group -->
 	<div class="flex items-center gap-0.5 rounded-md bg-background/60 p-0.5">
 		<Tooltip.Provider delayDuration={400}>

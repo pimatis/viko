@@ -1,9 +1,10 @@
 const DB_NAME = 'viko';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 export const STORE_PROJECT = 'project';
 export const STORE_VERSIONS = 'versions';
 export const STORE_MEDIA = 'media';
+export const STORE_SETTINGS = 'settings';
 
 export const PROJECT_KEY = 'current';
 
@@ -25,6 +26,9 @@ export function openDB(): Promise<IDBDatabase> {
 			}
 			if (!db.objectStoreNames.contains(STORE_MEDIA)) {
 				db.createObjectStore(STORE_MEDIA);
+			}
+			if (!db.objectStoreNames.contains(STORE_SETTINGS)) {
+				db.createObjectStore(STORE_SETTINGS);
 			}
 		};
 

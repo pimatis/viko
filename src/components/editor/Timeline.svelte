@@ -2571,6 +2571,7 @@
 
 <div
 	data-timeline-root
+	data-guide-target="timeline"
 	use:useShortcuts={timelineShortcuts}
 	class="flex h-56 shrink-0 flex-col border-t border-border bg-background select-none"
 >

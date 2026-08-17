@@ -284,6 +284,7 @@
 
 <Tooltip.Provider delayDuration={300}>
 	<header
+		data-guide-target="navbar"
 		use:useShortcuts={shortcuts}
 		class="flex h-11 items-center gap-2 border-b border-border bg-background px-2.5 select-none"
 	>

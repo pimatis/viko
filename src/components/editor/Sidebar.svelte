@@ -617,6 +617,7 @@
 {/if}
 
 <aside
+	data-guide-target="sidebar"
 	class={cn(
 		'flex h-full shrink-0 bg-sidebar select-none',
 		'fixed inset-y-0 left-0 z-50 md:relative md:z-auto',
