@@ -42,33 +42,6 @@
 					</Button>
 				</a>
 			</div>
-
-			<div class="mt-8 flex flex-wrap items-center justify-center gap-4">
-				<a
-					href="https://peerlist.io/queaxtra/project/viko"
-					target="_blank"
-					rel="noreferrer"
-				>
-					<img
-						src="https://peerlist.io/api/v1/projects/embed/PRJHGNQOBMD7A9NEEFMPGEDDK99QRA?showUpvote=false&theme=dark"
-						alt="Viko"
-						style="width: auto; height: 45px;"
-					/>
-				</a>
-				<a
-					href="https://www.producthunt.com/products/viko?embed=true&utm_source=badge-featured&utm_medium=badge&utm_campaign=badge-viko"
-					target="_blank"
-					rel="noopener noreferrer"
-				>
-					<img
-						alt="Viko - Free video editor that runs entirely in your browser | Product Hunt"
-						width="250"
-						height="54"
-						src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1221368&theme=dark&t=1786964425301"
-						style="width: auto; height: 45px;"
-					/>
-				</a>
-			</div>
 		</div>
 	</div>
 </section>

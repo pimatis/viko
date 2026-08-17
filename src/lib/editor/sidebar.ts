@@ -1,4 +1,4 @@
-import type { TextStyle } from './text';
+import type { TextAnimation, TextStyle } from './text';
 
 export type SidebarTab =
 	| 'media'
@@ -44,6 +44,7 @@ export type EditorResource = {
 	category?: string;
 	thumbnailUrl?: string;
 	textStyle?: TextStyle;
+	textAnimation?: TextAnimation;
 	sticker?: string;
 };
 

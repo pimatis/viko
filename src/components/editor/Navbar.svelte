@@ -426,7 +426,7 @@
 						</DropdownMenu.Item>
 						<DropdownMenu.Separator />
 						<DropdownMenu.Item
-							disabled={!isSaved || isExporting}
+							disabled={!isSaved}
 							onSelect={() => {
 								sound.start();
 								onExport();
@@ -733,7 +733,6 @@
 							variant="ghost"
 							size="xs"
 							class="shrink-0 gap-1 px-2.5 text-muted-foreground hover:text-foreground"
-							disabled={isExporting}
 						>
 							<span class="tabular-nums">
 								{exportQuality.label}
@@ -774,7 +773,7 @@
 							{...props}
 							variant="default"
 							size="sm"
-							disabled={!isSaved || isExporting}
+							disabled={!isSaved}
 							onclick={() => {
 								sound.start();
 								onExport();

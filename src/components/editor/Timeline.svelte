@@ -21,6 +21,7 @@
 	import { TEXT_PRESETS, type TextStyle } from '$lib/editor/text';
 	import { clampTimelineZoom, type EditorTool } from '$lib/editor/toolbar';
 	import { cloneColorGradeOrNull } from '$lib/grading';
+	import { createFrameRenderer, type ComposedFrameRenderer } from '$lib/export';
 	import { Pencil } from '@lucide/svelte';
 	import {
 		clampClipStart,
@@ -49,10 +50,12 @@
 		snapClipEdge,
 		snapClipStart,
 		ungroupClips,
+		unwrapSequenceClip,
 		trimClipKeyframesEnd,
 		trimClipKeyframesStart,
 		updateClipProperty,
 		updateClipVisual,
+		wrapClipsInSequence,
 		type ClipInsertRequest,
 		type Clip,
 		type ClipPropertyChangeRequest,
@@ -161,6 +164,19 @@
 
 	type TimelineClipboard = {
 		entries: ClipboardEntry[];
+	};
+
+	type TimelinePointerInteraction = {
+		pointerId: number;
+		target: HTMLElement;
+	};
+
+	type ThumbnailJob = {
+		id: string;
+		clipId: string;
+		time: number;
+		priority: 'hover' | 'filmstrip';
+		frameIndex?: number;
 	};
 
 	type ClipDrag = {
@@ -417,6 +433,16 @@
 	let clipTrim = $state<ClipTrim | null>(null);
 	let timelinePan = $state<TimelinePan | null>(null);
 	let inOutDrag = $state<{ edge: 'in' | 'out' } | null>(null);
+	let pointerInteraction: TimelinePointerInteraction | null = null;
+	let timelineRenderer: ComposedFrameRenderer | null = null;
+	let thumbnailWorker: Worker | null = null;
+	let activeThumbnailJob: ThumbnailJob | null = null;
+	let thumbnailJobs: ThumbnailJob[] = [];
+	let thumbnailJobIds = new Set<string>();
+	let filmstripFrames = $state<Record<string, string[]>>({});
+	let hoverPreview = $state<{ clipId: string; x: number; y: number; image: string | null } | null>(
+		null
+	);
 	let activeTrackId = $state<string | null>(tracks[0]?.id ?? null);
 	let selectedClipIds = $state<string[]>(selectedClipId ? [selectedClipId] : []);
 	let undoHistory = $state<Track[][]>([]);
@@ -515,6 +541,11 @@
 			track.clips.some((clip) => selectedClipIds.includes(clip.id) && Boolean(clip.groupId))
 		)
 	);
+	const selectedSequenceClip = $derived(
+		tracks
+			.flatMap((track) => track.clips)
+			.find((clip) => selectedClipIds.includes(clip.id) && Boolean(clip.sequence)) ?? null
+	);
 	const selectedTextClip = $derived(
 		tracks
 			.flatMap((track) => track.clips)
@@ -543,6 +574,14 @@
 	const activeTrackLocked = $derived(
 		tracks.find((track) => track.id === activeTrackId)?.locked ?? false
 	);
+	const filmstripClips = $derived(
+		tracks.flatMap((track) =>
+			track.clips.filter((clip) => {
+				const asset = clip.assetId ? assetsById.get(clip.assetId) : null;
+				return asset?.kind === 'video' || asset?.kind === 'image';
+			})
+		)
+	);
 
 	$effect(() => {
 		const container = scrollContainer;
@@ -563,6 +602,19 @@
 
 	$effect(() => {
 		onHistoryAvailabilityChange(undoHistory.length > 0, redoHistory.length > 0);
+	});
+
+	$effect(() => {
+		timelineRenderer?.dispose();
+		timelineRenderer = createFrameRenderer(tracks, mediaAssets);
+		filmstripFrames = {};
+		thumbnailJobs = [];
+		thumbnailJobIds = new Set();
+		queueFilmstripFrames();
+		return () => {
+			timelineRenderer?.dispose();
+			timelineRenderer = null;
+		};
 	});
 
 	$effect(() => {
@@ -698,8 +750,108 @@
 		return Math.max(0, Math.min(duration, x / pixelsPerSecond));
 	}
 
-	function startTimelinePan(event: MouseEvent) {
-		if (!scrollContainer || event.button !== 0) return;
+	function beginPointerInteraction(event: PointerEvent): boolean {
+		if (!(event.currentTarget instanceof HTMLElement)) return false;
+		try {
+			event.currentTarget.setPointerCapture(event.pointerId);
+		} catch {
+			// the pointer may already be gone (e.g. released between pointerdown
+			// and capture); abort the interaction instead of throwing
+			return false;
+		}
+		pointerInteraction = { pointerId: event.pointerId, target: event.currentTarget };
+		return true;
+	}
+
+	function endPointerInteraction(event?: PointerEvent) {
+		const interaction = pointerInteraction;
+		if (!interaction || (event && event.pointerId !== interaction.pointerId)) return;
+		try {
+			interaction.target.releasePointerCapture(interaction.pointerId);
+		} catch {
+			// capture may already be released when a clip is recreated during an edit
+		}
+		pointerInteraction = null;
+	}
+
+	function queueThumbnail(job: ThumbnailJob) {
+		if (thumbnailJobIds.has(job.id)) return;
+		thumbnailJobIds.add(job.id);
+		thumbnailJobs = [...thumbnailJobs, job];
+		dispatchThumbnailJob();
+	}
+
+	function dispatchThumbnailJob() {
+		if (!thumbnailWorker || activeThumbnailJob || thumbnailJobs.length === 0) return;
+		const hoverJobIndex = thumbnailJobs.findIndex((job) => job.priority === 'hover');
+		const jobIndex = hoverJobIndex >= 0 ? hoverJobIndex : 0;
+		const job = thumbnailJobs[jobIndex];
+		if (!job) return;
+		thumbnailJobs = thumbnailJobs.filter((_, index) => index !== jobIndex);
+		activeThumbnailJob = job;
+		thumbnailWorker.postMessage(job);
+	}
+
+	function queueFilmstripFrames() {
+		for (const clip of filmstripClips) {
+			const times = [0.15, 0.5, 0.85].map((position) =>
+				roundToFrame(clip.startTime + Math.max(0, clip.duration - 1 / FRAME_RATE) * position)
+			);
+			for (const [frameIndex, time] of times.entries()) {
+				queueThumbnail({
+					id: `filmstrip:${clip.id}:${frameIndex}`,
+					clipId: clip.id,
+					time,
+					priority: 'filmstrip',
+					frameIndex
+				});
+			}
+		}
+	}
+
+	async function renderThumbnail(job: ThumbnailJob) {
+		const renderer = timelineRenderer;
+		if (!renderer) return;
+		const canvas = document.createElement('canvas');
+		canvas.width = job.priority === 'hover' ? 240 : 96;
+		canvas.height = Math.max(2, Math.round((canvas.width * 9) / 16));
+		await renderer.render(canvas, job.time);
+		const image = canvas.toDataURL('image/jpeg', 0.72);
+		if (job.priority === 'hover') {
+			if (hoverPreview?.clipId === job.clipId) hoverPreview = { ...hoverPreview, image };
+			return;
+		}
+		const frames = [...(filmstripFrames[job.clipId] ?? [])];
+		frames[job.frameIndex ?? 0] = image;
+		filmstripFrames = { ...filmstripFrames, [job.clipId]: frames };
+	}
+
+	function queueHoverPreview(event: PointerEvent, clip: Clip) {
+		const target = event.currentTarget;
+		if (!(target instanceof HTMLElement)) return;
+		const rect = target.getBoundingClientRect();
+		const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / Math.max(1, rect.width)));
+		const time = roundToFrame(clip.startTime + Math.max(0, clip.duration - 1 / FRAME_RATE) * ratio);
+		hoverPreview = { clipId: clip.id, x: event.clientX + 14, y: event.clientY - 110, image: null };
+		queueThumbnail({
+			id: `hover:${clip.id}:${time}`,
+			clipId: clip.id,
+			time,
+			priority: 'hover'
+		});
+	}
+
+	function moveHoverPreview(event: PointerEvent, clip: Clip) {
+		if (hoverPreview?.clipId !== clip.id) return;
+		hoverPreview = { ...hoverPreview, x: event.clientX + 14, y: event.clientY - 110 };
+	}
+
+	function clearHoverPreview(clipId: string) {
+		if (hoverPreview?.clipId === clipId) hoverPreview = null;
+	}
+
+	function startTimelinePan(event: PointerEvent) {
+		if (!scrollContainer || event.button !== 0 || !beginPointerInteraction(event)) return;
 		event.preventDefault();
 		event.stopPropagation();
 		timelinePan = {
@@ -746,7 +898,7 @@
 	}
 
 	function pushUndoSnapshot(snapshot: Track[]) {
-		undoHistory = [...undoHistory.slice(-(HISTORY_LIMIT - 1)), cloneTracks(snapshot)];
+		undoHistory = [...undoHistory.slice(-(HISTORY_LIMIT - 1)), snapshot];
 		redoHistory = [];
 	}
 
@@ -963,7 +1115,7 @@
 		clearClipSelection();
 	}
 
-	function handleRulerClick(e: MouseEvent) {
+	function handleRulerClick(e: PointerEvent) {
 		if (activeTool === 'hand') {
 			startTimelinePan(e);
 			return;
@@ -985,13 +1137,14 @@
 		seekToPosition(e.clientX);
 	}
 
-	function handlePlayheadMouseDown(e: MouseEvent) {
+	function handlePlayheadPointerDown(e: PointerEvent) {
+		if (e.button !== 0 || !beginPointerInteraction(e)) return;
 		e.preventDefault();
 		e.stopPropagation();
 		isDraggingPlayhead = true;
 	}
 
-	function handleMouseMove(e: MouseEvent) {
+	function handlePointerMove(e: PointerEvent) {
 		if (inOutDrag) {
 			handleInOutDragMove(e);
 			return;
@@ -1106,13 +1259,19 @@
 		);
 	}
 
-	function handleMouseUp() {
+	function handlePointerEnd(event?: PointerEvent) {
+		if (event && pointerInteraction && event.pointerId !== pointerInteraction.pointerId) return;
+		endPointerInteraction(event);
 		if (inOutDrag) {
 			handleInOutDragEnd();
-			return;
+		} else {
+			finishClipInteraction();
 		}
 		isDraggingPlayhead = false;
 		timelinePan = null;
+	}
+
+	function finishClipInteraction() {
 		if (clipTrim) {
 			if (clipTrim.didMove) {
 				sound.drop();
@@ -1134,10 +1293,11 @@
 	}
 
 	function handleWindowBlur() {
-		handleMouseUp();
+		handlePointerEnd();
 	}
 
 	function cancelClipDrag() {
+		endPointerInteraction();
 		if (!clipDrag) return;
 		tracks = clipDrag.originalTracks;
 		activeTrackId = clipDrag.sourceTrackId;
@@ -1145,6 +1305,7 @@
 	}
 
 	function cancelClipTrim() {
+		endPointerInteraction();
 		if (!clipTrim) return;
 		tracks = clipTrim.originalTracks;
 		activeTrackId = clipTrim.trackId;
@@ -1388,7 +1549,7 @@
 		updateTrack(trackId, (track) => ({ ...track, locked: !track.locked }));
 	}
 
-	function handleTrackMouseDown(e: MouseEvent, trackId: string) {
+	function handleTrackPointerDown(e: PointerEvent, trackId: string) {
 		if ((e.target as HTMLElement).closest('[data-clip]')) return;
 		if (activeTool === 'hand') {
 			startTimelinePan(e);
@@ -1614,7 +1775,7 @@
 		textStyleDraft = { ...textStyleDraft, textTransform: value as TextStyle['textTransform'] };
 	}
 
-	function handleClipMouseDown(e: MouseEvent, track: Track, clip: Clip) {
+	function handleClipPointerDown(e: PointerEvent, track: Track, clip: Clip) {
 		if (e.button !== 0 || track.locked || !scrollContainer) return;
 		if ((e.target as HTMLElement).closest('[data-trim-handle]')) return;
 		if (activeTool === 'hand') {
@@ -1652,6 +1813,7 @@
 				onSeek(clip.startTime);
 			}
 		}
+		if (!beginPointerInteraction(e)) return;
 		activeTrackId = track.id;
 
 		const rect = scrollContainer.getBoundingClientRect();
@@ -1669,13 +1831,14 @@
 	}
 
 	function startClipTrim(
-		event: MouseEvent,
+		event: PointerEvent,
 		track: Track,
 		clip: Clip,
 		edge: ClipTrim['edge'],
 		mode: ClipTrim['mode'] = 'trim'
 	) {
-		if (event.button !== 0 || track.locked || !scrollContainer) return;
+		if (event.button !== 0 || track.locked || !scrollContainer || !beginPointerInteraction(event))
+			return;
 		event.preventDefault();
 		event.stopPropagation();
 		stopPlayback();
@@ -2005,6 +2168,32 @@
 		commitTracks(nextTracks);
 	}
 
+	function wrapSelectedClipsInSequence() {
+		const selectedIds = getSelectedClipIds();
+		if (selectedIds.length < 2) return;
+		sound.select();
+		const sequenceId = `sequence-${Date.now()}-${trackIdSequence++}`;
+		const nextTracks = wrapClipsInSequence(tracks, selectedIds, sequenceId);
+		if (nextTracks === tracks) return;
+		commitTracks(nextTracks);
+		setClipSelection([sequenceId]);
+	}
+
+	function unwrapSelectedSequence() {
+		if (!selectedSequenceClip) return;
+		sound.select();
+		const nextTracks = unwrapSequenceClip(tracks, selectedSequenceClip.id);
+		if (nextTracks === tracks) return;
+		commitTracks(nextTracks);
+		clearClipSelection();
+	}
+
+	function seekToMarker(marker: Marker) {
+		sound.seek();
+		currentTime = Math.max(0, Math.min(duration, marker.time));
+		onSeek(currentTime);
+	}
+
 	function addMarkerAtPlayhead() {
 		sound.select();
 		const newMarker: Marker = {
@@ -2027,11 +2216,27 @@
 		);
 	}
 
-	function startInOutDrag(edge: 'in' | 'out') {
+	function toggleMarkerTask(markerId: string) {
+		onMarkersChange(
+			markers.map((marker) =>
+				marker.id === markerId
+					? {
+							...marker,
+							label: marker.label.startsWith('[x] ')
+								? marker.label.slice(4)
+								: `[x] ${marker.label || 'Task'}`
+						}
+					: marker
+			)
+		);
+	}
+
+	function startInOutDrag(event: PointerEvent, edge: 'in' | 'out') {
+		if (!beginPointerInteraction(event)) return;
 		inOutDrag = { edge };
 	}
 
-	function handleInOutDragMove(e: MouseEvent) {
+	function handleInOutDragMove(e: PointerEvent) {
 		if (!inOutDrag) return;
 		const time = getTimeAtClientX(e.clientX);
 		if (time === null) return;
@@ -2554,7 +2759,7 @@
 	function handleNudgeArrow(e: KeyboardEvent) {
 		const direction = e.key === 'ArrowLeft' ? -1 : 1;
 		const magnitude = e.shiftKey ? 1 : 10;
-		const originalTracks = cloneTracks(tracks);
+		const originalTracks = tracks;
 		const nextTracks = nudgeClips(tracks, getSelectedClipIds(), direction * magnitude, duration);
 		if (nextTracks !== tracks) {
 			pushUndoSnapshot(originalTracks);
@@ -2564,10 +2769,42 @@
 		}
 	}
 
-	onDestroy(stopPlayback);
+	$effect(() => {
+		const worker = new Worker(
+			new URL('../../lib/editor/timelineThumbnailQueue.worker.ts', import.meta.url),
+			{ type: 'module' }
+		);
+		thumbnailWorker = worker;
+		worker.onmessage = async ({ data }: MessageEvent<ThumbnailJob>) => {
+			try {
+				await renderThumbnail(data);
+			} catch {
+				// Timeline thumbnails are best-effort and must never block editing.
+			} finally {
+				thumbnailJobIds.delete(data.id);
+				activeThumbnailJob = null;
+				dispatchThumbnailJob();
+			}
+		};
+		queueFilmstripFrames();
+		return () => {
+			worker.terminate();
+			if (thumbnailWorker === worker) thumbnailWorker = null;
+		};
+	});
+
+	onDestroy(() => {
+		stopPlayback();
+		timelineRenderer?.dispose();
+	});
 </script>
 
-<svelte:window onmousemove={handleMouseMove} onmouseup={handleMouseUp} onblur={handleWindowBlur} />
+<svelte:window
+	onpointermove={handlePointerMove}
+	onpointerup={(event) => handlePointerEnd(event)}
+	onpointercancel={(event) => handlePointerEnd(event)}
+	onblur={handleWindowBlur}
+/>
 
 <div
 	data-timeline-root
@@ -2778,6 +3015,25 @@
 							variant="ghost"
 							size="icon-xs"
 							class="text-muted-foreground hover:text-foreground"
+							onclick={wrapSelectedClipsInSequence}
+							disabled={selectedClipIds.length < 2}
+						>
+							<Layers class="size-4" />
+						</Button>
+					{/snippet}
+				</Tooltip.Trigger>
+				<Tooltip.Content>Nest sequence</Tooltip.Content>
+			</Tooltip.Root>
+		</Tooltip.Provider>
+		<Tooltip.Provider delayDuration={400}>
+			<Tooltip.Root>
+				<Tooltip.Trigger>
+					{#snippet child({ props })}
+						<Button
+							{...props}
+							variant="ghost"
+							size="icon-xs"
+							class="text-muted-foreground hover:text-foreground"
 							onclick={toggleSelectedClipsReversed}
 							disabled={!selectedClipsCanReverse}
 						>
@@ -2879,6 +3135,44 @@
 	</div>
 
 	<!-- Clipboard panel -->
+	{#if markers.length > 0}
+		<div
+			class="flex h-10 shrink-0 items-center gap-1.5 overflow-x-auto border-b border-border bg-card/40 px-2.5"
+		>
+			<span class="shrink-0 text-[10px] font-semibold text-muted-foreground">Markers</span>
+			{#each markers as marker (marker.id)}
+				<button
+					class={cn(
+						'flex h-6 shrink-0 items-center gap-1 rounded-md border border-border bg-background/60 px-1.5 text-[10px] text-muted-foreground hover:text-foreground',
+						marker.label.startsWith('[x] ') && 'opacity-60'
+					)}
+					onclick={() => seekToMarker(marker)}
+					title={`Go to ${formatTime(marker.time)}`}
+				>
+					<MapPin class="size-3 text-red-400" />
+					<span class="font-mono tabular-nums">{formatTime(marker.time)}</span>
+					<span class="max-w-32 truncate">{marker.label.replace(/^\[x\] /, '') || 'Task'}</span>
+				</button>
+				<button
+					class="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-secondary hover:text-foreground"
+					onclick={() => toggleMarkerTask(marker.id)}
+					aria-label="Toggle marker task"
+					title="Toggle task"
+				>
+					{marker.label.startsWith('[x] ') ? '✓' : '○'}
+				</button>
+				<button
+					class="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-destructive/15 hover:text-destructive"
+					onclick={() => removeMarker(marker.id)}
+					aria-label="Delete marker"
+					title="Delete marker"
+				>
+					<Trash class="size-3" />
+				</button>
+			{/each}
+		</div>
+	{/if}
+
 	{#if clipboardPanelOpen && clipboard}
 		<div
 			class="flex max-h-24 shrink-0 flex-col gap-1.5 overflow-y-auto border-b border-border bg-card/50 px-2.5 py-2"
@@ -3107,7 +3401,7 @@
 							<div
 								class="relative sticky top-0 z-10 cursor-pointer border-b border-border bg-card"
 								style="height: {RULER_HEIGHT}px"
-								onmousedown={handleRulerClick}
+								onpointerdown={handleRulerClick}
 							>
 								{#each rulerMarks as mark (mark.time)}
 									<div
@@ -3173,10 +3467,10 @@
 											class="pointer-events-auto absolute top-0 bottom-0 z-20 cursor-ew-resize"
 											style="left: {inX}px; width: 3px"
 											title="In point - {formatTime(inOutPoints.in)}"
-											onmousedown={(e) => {
+											onpointerdown={(e) => {
 												e.stopPropagation();
 												e.preventDefault();
-												startInOutDrag('in');
+												startInOutDrag(e, 'in');
 											}}
 										>
 											<div class="absolute top-0 left-0 h-full w-full bg-emerald-500"></div>
@@ -3192,10 +3486,10 @@
 											class="pointer-events-auto absolute top-0 bottom-0 z-20 cursor-ew-resize"
 											style="left: {outX}px; width: 3px"
 											title="Out point - {formatTime(inOutPoints.out)}"
-											onmousedown={(e) => {
+											onpointerdown={(e) => {
 												e.stopPropagation();
 												e.preventDefault();
-												startInOutDrag('out');
+												startInOutDrag(e, 'out');
 											}}
 										>
 											<div class="absolute top-0 left-0 h-full w-full bg-emerald-500"></div>
@@ -3222,7 +3516,7 @@
 										trackIndex % 2 === 0 ? 'bg-background' : 'bg-background/50'
 									)}
 									style="height: {TRACK_HEIGHT}px"
-									onmousedown={(e) => handleTrackMouseDown(e, track.id)}
+									onpointerdown={(e) => handleTrackPointerDown(e, track.id)}
 									oncontextmenu={() => (activeTrackId = track.id)}
 									ondragover={(event) => handleInsertDragOver(event, track)}
 									ondrop={(event) => handleInsertDrop(event, track)}
@@ -3259,13 +3553,27 @@
 											style="left: {clipLeft}px; width: {Math.max(clipWidth, 2)}px"
 											onclick={(e) => handleClipClick(e, clip.id)}
 											ondblclick={(event) => handleClipDoubleClick(event, clip)}
-											onmousedown={(e) => handleClipMouseDown(e, track, clip)}
+											onpointerdown={(e) => handleClipPointerDown(e, track, clip)}
+											onpointerenter={(event) => queueHoverPreview(event, clip)}
+											onpointermove={(event) => moveHoverPreview(event, clip)}
+											onpointerleave={() => clearHoverPreview(clip.id)}
 											oncontextmenu={() => handleClipContextMenu(clip.id)}
 											ondragover={(event) => handleEffectDragOver(event, track)}
 											ondrop={(event) => handleEffectDrop(event, track, clip)}
 										>
 											{#if asset?.kind === 'audio' && clip.assetId}
 												<Waveform src={asset.src} {pixelsPerSecond} volume={clip.volume ?? 1} />
+											{:else if filmstripFrames[clip.id]?.length}
+												<div
+													class="pointer-events-none absolute inset-0 flex overflow-hidden opacity-55"
+													aria-hidden="true"
+												>
+													{#each filmstripFrames[clip.id] as frame, frameIndex (`${clip.id}-${frameIndex}`)}
+														{#if frame}
+															<img src={frame} alt="" class="h-full min-w-0 flex-1 object-cover" />
+														{/if}
+													{/each}
+												</div>
 											{/if}
 											{#if track.type === 'adjustment' && clipWidth > 16}
 												<Layers class="size-3 shrink-0 text-purple-400" title="Adjustment layer" />
@@ -3278,7 +3586,7 @@
 													isClipSelected && 'opacity-100',
 													track.locked && 'cursor-not-allowed'
 												)}
-												onmousedown={(event) =>
+												onpointerdown={(event) =>
 													startClipTrim(
 														event,
 														track,
@@ -3343,7 +3651,11 @@
 													</span>
 												{/if}
 											{/if}
-											{#if clip.groupId && clipWidth > 25}
+											{#if clip.sequence && clipWidth > 25}
+												<span class="ml-1 shrink-0 text-primary" title="Nested sequence">
+													<Layers class="size-2.5" />
+												</span>
+											{:else if clip.groupId && clipWidth > 25}
 												<span class="ml-1 shrink-0 text-primary">
 													<Group class="size-2.5" />
 												</span>
@@ -3361,7 +3673,7 @@
 													isClipSelected && 'opacity-100',
 													track.locked && 'cursor-not-allowed'
 												)}
-												onmousedown={(event) =>
+												onpointerdown={(event) =>
 													startClipTrim(
 														event,
 														track,
@@ -3446,6 +3758,19 @@
 								></div>
 							{/if}
 
+							{#if hoverPreview?.image}
+								<div
+									class="pointer-events-none fixed z-[70] overflow-hidden rounded-md border border-border bg-card p-1 shadow-xl"
+									style="left: {hoverPreview.x}px; top: {hoverPreview.y}px"
+								>
+									<img
+										src={hoverPreview.image}
+										alt="Timeline preview"
+										class="h-[135px] w-[240px] object-cover"
+									/>
+								</div>
+							{/if}
+
 							<!-- Playhead -->
 							<div
 								class={cn(
@@ -3461,7 +3786,7 @@
 										'pointer-events-auto absolute top-0 left-1/2 -translate-x-1/2 cursor-col-resize transition-transform hover:scale-110',
 										'border-t-[7px] border-r-[6px] border-l-[6px] border-t-red-500 border-r-transparent border-l-transparent drop-shadow'
 									)}
-									onmousedown={handlePlayheadMouseDown}
+									onpointerdown={handlePlayheadPointerDown}
 								></div>
 								<!-- Line -->
 								<div class="absolute top-2 bottom-0 w-0.5 bg-red-500 shadow-sm"></div>
@@ -3560,6 +3885,18 @@
 						<Ungroup class="size-4" />
 						Ungroup clips
 						<ContextMenu.Shortcut>{formatShortcut(ungroupShortcut)}</ContextMenu.Shortcut>
+					</ContextMenu.Item>
+				{/if}
+				{#if selectedClipIds.length >= 2}
+					<ContextMenu.Item onclick={wrapSelectedClipsInSequence}>
+						<Layers class="size-4" />
+						Nest sequence
+					</ContextMenu.Item>
+				{/if}
+				{#if selectedSequenceClip}
+					<ContextMenu.Item onclick={unwrapSelectedSequence}>
+						<Ungroup class="size-4" />
+						Unnest sequence
 					</ContextMenu.Item>
 				{/if}
 				<ContextMenu.Separator />

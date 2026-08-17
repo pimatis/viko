@@ -1,22 +1,25 @@
 <script lang="ts">
-	import * as Dialog from '$lib/components/ui/dialog';
 	import { Progress } from '$lib/components/ui/progress';
 	import type { EditorState } from '$lib/editor/state.svelte';
 
 	let { editor }: { editor: EditorState } = $props();
 </script>
 
-<Dialog.Root open={editor.isExporting} onOpenChange={() => {}}>
-	<Dialog.Content class="sm:max-w-sm" showCloseButton={false}>
-		<Dialog.Header>
-			<Dialog.Title>Exporting video</Dialog.Title>
-			<Dialog.Description>
-				{editor.exportProgress?.message ?? 'Preparing...'}
-			</Dialog.Description>
-		</Dialog.Header>
-		<div class="flex flex-col gap-2">
-			<Progress value={editor.exportPercent} max={100} />
-			<p class="text-xs text-muted-foreground tabular-nums">{editor.exportPercent}%</p>
+{#if editor.isExporting}
+	<section
+		class="fixed right-5 bottom-5 z-[80] w-72 border border-border bg-card p-4 shadow-xl"
+		aria-label="Export progress"
+	>
+		<div class="mb-3 flex items-center justify-between gap-3">
+			<p class="text-sm font-semibold text-foreground">Exporting video</p>
+			<span class="text-xs text-muted-foreground tabular-nums">{editor.exportPercent}%</span>
 		</div>
-	</Dialog.Content>
-</Dialog.Root>
+		<p class="mb-2 truncate text-xs text-muted-foreground">
+			{editor.exportProgress?.message ?? 'Preparing...'}
+		</p>
+		<Progress value={editor.exportPercent} max={100} />
+		{#if editor.exportQueue.length > 0}
+			<p class="mt-2 text-xs text-muted-foreground">{editor.exportQueue.length} queued</p>
+		{/if}
+	</section>
+{/if}

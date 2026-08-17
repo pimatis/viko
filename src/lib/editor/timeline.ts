@@ -1,7 +1,7 @@
 import type { ClipEffect, ClipTransition } from '$lib/effects';
 import { cloneColorGradeOrNull, type ColorGrade } from '$lib/grading';
 import { DEFAULT_CHROMA_KEY } from '$lib/chroma';
-import type { TextStyle } from './text';
+import type { TextAnimation, TextStyle } from './text';
 
 export type TrackType = 'video' | 'audio' | 'subtitle' | 'adjustment';
 
@@ -233,6 +233,14 @@ export type Marker = {
 	color: string;
 };
 
+export type SequenceClipTrack = Pick<
+	Track,
+	'name' | 'type' | 'color' | 'muted' | 'locked' | 'volume' | 'pan'
+> & {
+	id: string;
+	clips: Clip[];
+};
+
 export type Clip = {
 	id: string;
 	name: string;
@@ -243,6 +251,7 @@ export type Clip = {
 	sourceStart?: number;
 	sourceDuration?: number;
 	textStyle?: TextStyle;
+	textAnimation?: TextAnimation;
 	caption?: boolean;
 	sticker?: string;
 	stickerColor?: string;
@@ -265,6 +274,9 @@ export type Clip = {
 	chromaKey?: ChromaKey;
 	keyframes?: Keyframe[];
 	groupId?: string;
+	sequence?: {
+		tracks: SequenceClipTrack[];
+	};
 };
 
 export type ClipVisualUpdateRequest = {
@@ -1188,6 +1200,96 @@ export function moveGroupedClips(
 		groupClipIds,
 		Math.round(deltaStartTime * FRAME_RATE),
 		timelineDuration
+	);
+}
+
+export function wrapClipsInSequence(
+	tracks: Track[],
+	clipIds: string[],
+	sequenceId: string
+): Track[] {
+	const selectedIds = new Set(clipIds);
+	const selectedClips = tracks
+		.flatMap((track) => track.clips.map((clip) => ({ track, clip })))
+		.filter(({ track, clip }) => !track.locked && selectedIds.has(clip.id));
+	if (selectedClips.length < 2) return tracks;
+
+	const startTime = Math.min(...selectedClips.map(({ clip }) => clip.startTime));
+	const endTime = Math.max(...selectedClips.map(({ clip }) => clip.startTime + clip.duration));
+	const sequenceTrackIds = new Map<string, string>();
+	const sequenceTracks: SequenceClipTrack[] = [];
+
+	for (const track of tracks) {
+		const clips = track.clips
+			.filter((clip) => selectedIds.has(clip.id))
+			.map((clip) => ({ ...clip, startTime: roundToFrame(clip.startTime - startTime) }));
+		if (clips.length === 0 || track.locked) continue;
+		const id = `${sequenceId}-${track.id}`;
+		sequenceTrackIds.set(track.id, id);
+		sequenceTracks.push({
+			id,
+			name: track.name,
+			type: track.type,
+			color: track.color,
+			muted: track.muted,
+			locked: track.locked,
+			volume: track.volume,
+			pan: track.pan,
+			clips
+		});
+	}
+
+	const firstTrackId = selectedClips[0].track.id;
+	let inserted = false;
+	let changed = false;
+	const nextTracks = tracks.map((track) => {
+		if (track.locked) return track;
+		const remaining = track.clips.filter((clip) => !selectedIds.has(clip.id));
+		if (remaining.length !== track.clips.length) changed = true;
+		if (track.id !== firstTrackId || inserted) return { ...track, clips: remaining };
+		inserted = true;
+		return {
+			...track,
+			clips: [
+				...remaining,
+				{
+					id: sequenceId,
+					name: 'Nested sequence',
+					startTime,
+					duration: roundToFrame(endTime - startTime),
+					sourceInstanceId: sequenceId,
+					sequence: { tracks: sequenceTracks }
+				}
+			].sort((left, right) => left.startTime - right.startTime)
+		};
+	});
+	return changed && sequenceTracks.length > 0 ? nextTracks : tracks;
+}
+
+export function unwrapSequenceClip(tracks: Track[], sequenceClipId: string): Track[] {
+	const sourceTrack = tracks.find((track) =>
+		track.clips.some((clip) => clip.id === sequenceClipId)
+	);
+	const sequenceClip = sourceTrack?.clips.find((clip) => clip.id === sequenceClipId);
+	if (!sourceTrack || sourceTrack.locked || !sequenceClip?.sequence) return tracks;
+
+	const clips = sequenceClip.sequence.tracks.flatMap((track) =>
+		track.clips.map((clip) => ({
+			...clip,
+			id: `${clip.id}-unwrapped-${Date.now()}`,
+			startTime: roundToFrame(sequenceClip.startTime + clip.startTime)
+		}))
+	);
+
+	return tracks.map((track) =>
+		track.id === sourceTrack.id
+			? {
+					...track,
+					clips: [...track.clips.filter((clip) => clip.id !== sequenceClipId), ...clips].sort(
+						(left, right) => left.startTime - right.startTime
+					)
+				}
+			: track
 	);
 }
 

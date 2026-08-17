@@ -43,15 +43,11 @@ import {
 	clampChromaSpill,
 	DEFAULT_CHROMA_KEY
 } from '$lib/chroma';
-import {
-	clampTransitionDuration,
-	getEffectPreset,
-	isClipTransitionPreset
-} from '$lib/effects';
+import { clampTransitionDuration, getEffectPreset, isClipTransitionPreset } from '$lib/effects';
 import { clampDuckAmountDb } from '$lib/audio/ducking';
 import type { MediaAsset, MediaFolder } from '$lib/editor/sidebar';
 import { STICKER_PRESETS } from '$lib/editor/sidebar';
-import { TEXT_PRESETS, type TextStyle } from '$lib/editor/text';
+import { TEXT_PRESETS, type TextAnimation, type TextStyle } from '$lib/editor/text';
 import {
 	PLAYER_ASPECT_RATIO_PRESETS,
 	PLAYER_ASPECT_RATIOS,
@@ -70,6 +66,7 @@ import {
 } from '$lib/editor/constants';
 
 const allowedFonts = new Set(TEXT_PRESETS.map((preset) => preset.textStyle.fontFamily));
+const allowedTextAnimations = new Set<TextAnimation>(['lower-third-slide', 'lower-third-pop']);
 const allowedStickers = new Set(STICKER_PRESETS.map((preset) => preset.sticker));
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -115,8 +112,7 @@ function sanitizeSecondary(value: unknown): SecondaryCorrection {
 	if (!isRecord(value)) return { ...DEFAULT_SECONDARY_CORRECTION };
 	const windowValue = isRecord(value.window) ? value.window : {};
 	const window: SecondaryPowerWindow = {
-		type:
-			windowValue.type === 'ellipse' || windowValue.type === 'rect' ? windowValue.type : 'full',
+		type: windowValue.type === 'ellipse' || windowValue.type === 'rect' ? windowValue.type : 'full',
 		cx: clampSecondaryPercent(typeof windowValue.cx === 'number' ? windowValue.cx : 50, 50),
 		cy: clampSecondaryPercent(typeof windowValue.cy === 'number' ? windowValue.cy : 50, 50),
 		width: clampSecondaryPercent(
@@ -148,7 +144,9 @@ function sanitizeSecondary(value: unknown): SecondaryCorrection {
 				? value.lumaCenter
 				: DEFAULT_SECONDARY_CORRECTION.lumaCenter,
 		lumaRange:
-			typeof value.lumaRange === 'number' ? value.lumaRange : DEFAULT_SECONDARY_CORRECTION.lumaRange,
+			typeof value.lumaRange === 'number'
+				? value.lumaRange
+				: DEFAULT_SECONDARY_CORRECTION.lumaRange,
 		softness:
 			typeof value.softness === 'number' ? value.softness : DEFAULT_SECONDARY_CORRECTION.softness,
 		lumaWeight:
@@ -273,13 +271,9 @@ function sanitizeClip(value: unknown): Clip | null {
 	const clipTransition = isRecord(value.clipTransition)
 		? {
 				presetId:
-					typeof value.clipTransition.presetId === 'string'
-						? value.clipTransition.presetId
-						: null,
+					typeof value.clipTransition.presetId === 'string' ? value.clipTransition.presetId : null,
 				duration:
-					typeof value.clipTransition.duration === 'number'
-						? value.clipTransition.duration
-						: null,
+					typeof value.clipTransition.duration === 'number' ? value.clipTransition.duration : null,
 				incomingClipId:
 					typeof value.clipTransition.incomingClipId === 'string'
 						? value.clipTransition.incomingClipId
@@ -303,6 +297,14 @@ function sanitizeClip(value: unknown): Clip | null {
 			incomingClipId: clipTransition.incomingClipId.slice(0, 200)
 		};
 	})();
+	const sequenceTracks =
+		isRecord(value.sequence) && Array.isArray(value.sequence.tracks)
+			? value.sequence.tracks.slice(0, MAX_PROJECT_TRACKS).flatMap((track) => {
+					const sanitized = sanitizeTrack(track);
+					return sanitized ? [sanitized] : [];
+				})
+			: [];
+
 	return {
 		id: value.id.slice(0, 200),
 		name: value.name.trim().slice(0, 500) || 'Untitled clip',
@@ -324,6 +326,11 @@ function sanitizeClip(value: unknown): Clip | null {
 				? roundToFrame(value.sourceDuration)
 				: undefined,
 		textStyle: validTextStyle ? (textStyle as TextStyle) : undefined,
+		textAnimation:
+			typeof value.textAnimation === 'string' &&
+			allowedTextAnimations.has(value.textAnimation as TextAnimation)
+				? (value.textAnimation as TextAnimation)
+				: undefined,
 		caption: value.caption === true ? true : undefined,
 		sticker:
 			typeof value.sticker === 'string' && allowedStickers.has(value.sticker)
@@ -475,7 +482,8 @@ function sanitizeClip(value: unknown): Clip | null {
 					];
 				})
 			: undefined,
-		groupId: typeof value.groupId === 'string' ? value.groupId.slice(0, 200) : undefined
+		groupId: typeof value.groupId === 'string' ? value.groupId.slice(0, 200) : undefined,
+		sequence: sequenceTracks.length > 0 ? { tracks: sequenceTracks } : undefined
 	};
 }
 
@@ -576,12 +584,10 @@ export function parseProjectDocument(value: unknown): ProjectDocument | null {
 	const rawAssets = Array.isArray(value.mediaAssets) ? value.mediaAssets : [];
 	const rawMarkers = Array.isArray(value.markers) ? value.markers : [];
 	const rawFolders = Array.isArray(value.mediaFolders) ? value.mediaFolders : [];
-	const mediaFolders = rawFolders
-		.slice(0, MAX_PROJECT_FOLDERS)
-		.flatMap((folder) => {
-			const sanitized = sanitizeMediaFolder(folder);
-			return sanitized ? [sanitized] : [];
-		});
+	const mediaFolders = rawFolders.slice(0, MAX_PROJECT_FOLDERS).flatMap((folder) => {
+		const sanitized = sanitizeMediaFolder(folder);
+		return sanitized ? [sanitized] : [];
+	});
 	const folderIds = new Set(mediaFolders.map((folder) => folder.id));
 	return {
 		format: PROJECT_FORMAT,

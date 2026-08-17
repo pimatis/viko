@@ -150,6 +150,10 @@ export function getActivePlayerLayers(
 			const clipEnd = clip.startTime + clip.duration;
 			if (currentTime < clip.startTime || currentTime >= clipEnd) continue;
 			const clipTime = Math.max(0, currentTime - clip.startTime);
+			if (clip.sequence) {
+				activeLayers.push(...getActivePlayerLayers(clip.sequence.tracks, assetsById, clipTime));
+				continue;
+			}
 			const sourceTime = getClipSourceTime(clip, clipTime);
 			activeLayers.push({
 				clip,

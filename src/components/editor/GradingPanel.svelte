@@ -43,6 +43,9 @@
 		allowLut?: boolean;
 		matchSources?: { id: string; name: string }[];
 		onMatchColor?: (sourceClipId: string) => void;
+		onAutoLevels?: () => void;
+		autoLeveling?: boolean;
+		onLutPreview?: (lutId: string | null, canvas: HTMLCanvasElement) => void;
 		matching?: boolean;
 	};
 
@@ -52,6 +55,9 @@
 		allowLut = true,
 		matchSources = [],
 		onMatchColor,
+		onAutoLevels,
+		autoLeveling = false,
+		onLutPreview,
 		matching = false
 	}: Props = $props();
 
@@ -570,21 +576,36 @@
 			{#each LUT_PRESETS as lut (lut.id)}
 				<button
 					class={cn(
-						'flex w-full items-center gap-2 rounded-md border border-border px-2 py-1.5 text-left transition-colors',
+						'group relative flex w-full items-center gap-2 rounded-md border border-border px-2 py-1.5 text-left transition-colors',
 						currentGrade.lutId === lut.id ? 'bg-secondary' : 'hover:bg-secondary/60'
 					)}
+					onmouseenter={(event) => {
+						const canvas = event.currentTarget.querySelector('canvas');
+						if (canvas instanceof HTMLCanvasElement) onLutPreview?.(lut.id, canvas);
+					}}
 					onclick={() => selectLut(lut.id)}
 				>
-					<span
-						class="size-6 shrink-0 rounded-sm"
-						style="background: linear-gradient(135deg, #ff6a00, #00b3ff); filter: {lut.previewFilter}"
-					></span>
+					<canvas
+						class="size-10 shrink-0 rounded-sm bg-muted"
+						aria-label={`${lut.name} LUT preview`}
+					></canvas>
 					<span class="flex-1 text-[10px] font-medium text-foreground">{lut.name}</span>
-					{#if currentGrade.lutId === lut.id}
-						<Check class="size-3 text-primary" />
-					{/if}
+					{#if currentGrade.lutId === lut.id}<Check class="size-3 text-primary" />{/if}
 				</button>
 			{/each}
+
+			{#if onAutoLevels}
+				<Button
+					variant="outline"
+					size="sm"
+					class="mt-2 w-full"
+					onclick={onAutoLevels}
+					disabled={autoLeveling}
+				>
+					<Wand2 class="size-3.5" />
+					{autoLeveling ? 'Analyzing frame…' : 'Auto-levels'}
+				</Button>
+			{/if}
 
 			<div class="flex items-center gap-2 pt-2">
 				<div class="h-px flex-1 bg-border"></div>

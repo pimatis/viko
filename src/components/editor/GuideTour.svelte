@@ -272,14 +272,14 @@
 	></div>
 	<div
 		style="position: fixed; top: {tooltipPos.top}px; left: {tooltipPos.left}px; width: {TOOLTIP_WIDTH}px; z-index: 50; transition: top 0.3s ease, left 0.3s ease; max-height: calc(100vh - 32px);"
-		class="flex flex-col rounded-xl bg-popover p-4 text-popover-foreground ring-1 ring-foreground/10 shadow-2xl"
+		class="flex flex-col rounded-xl bg-popover p-4 text-popover-foreground shadow-2xl ring-1 ring-foreground/10"
 		bind:this={tooltipEl}
 	>
 		<div class="mb-3 flex shrink-0 items-center justify-between">
-			<span class="text-[10px] font-bold uppercase tracking-wider text-primary">
+			<span class="text-[10px] font-bold tracking-wider text-primary uppercase">
 				{guideSteps[currentStep].title}
 			</span>
-			<span class="text-[10px] font-medium tabular-nums text-muted-foreground">
+			<span class="text-[10px] font-medium text-muted-foreground tabular-nums">
 				{currentStep + 1} / {guideSteps.length}
 			</span>
 		</div>
@@ -329,8 +329,8 @@
 				<Dialog.Title>You're all set!</Dialog.Title>
 			</div>
 			<Dialog.Description>
-				You now know the key areas of the Viko editor. Press Ctrl+K for the command palette or Ctrl+/
-				for keyboard shortcuts anytime.
+				You now know the key areas of the Viko editor. Press Ctrl+K for the command palette or
+				Ctrl+/ for keyboard shortcuts anytime.
 			</Dialog.Description>
 		</Dialog.Header>
 		<Dialog.Footer>
@@ -344,4 +344,3 @@
 		</Dialog.Footer>
 	</Dialog.Content>
 </Dialog.Root>
-

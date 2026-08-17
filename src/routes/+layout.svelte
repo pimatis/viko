@@ -12,9 +12,8 @@
 {@render children()}
 
 <style>
-	@import url('https://fonts.cdnfonts.com/css/sf-pro-display');
 	:global(body) {
-		font-family: 'SF Pro Display', sans-serif;
+		font-family: 'Inter Variable', system-ui, sans-serif;
 		margin: 0;
 		padding: 0;
 		justify-content: center;

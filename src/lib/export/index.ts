@@ -1,12 +1,19 @@
-import { FFmpeg } from '@ffmpeg/ffmpeg';
-import { fetchFile } from '@ffmpeg/util';
-import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
+import type { FFmpeg } from '@ffmpeg/ffmpeg';
 
 // load ffmpeg-core from CDN to avoid bundling the 31 MB wasm
 const FFMPEG_CORE_VERSION = '0.12.10';
 const FFMPEG_CDN_BASE = `https://cdn.jsdelivr.net/npm/@ffmpeg/core@${FFMPEG_CORE_VERSION}/dist/umd`;
-const ffmpegCoreURL = `${FFMPEG_CDN_BASE}/ffmpeg-core.js`;
-const ffmpegCoreWasmURL = `${FFMPEG_CDN_BASE}/ffmpeg-core.wasm`;
+const FFMPEG_MT_CDN_BASE = `https://cdn.jsdelivr.net/npm/@ffmpeg/core-mt@${FFMPEG_CORE_VERSION}/dist/umd`;
+
+function getFfmpegLoadConfig() {
+	const useMultithreadCore = typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated;
+	const baseURL = useMultithreadCore ? FFMPEG_MT_CDN_BASE : FFMPEG_CDN_BASE;
+	return {
+		coreURL: `${baseURL}/ffmpeg-core.js`,
+		wasmURL: `${baseURL}/ffmpeg-core.wasm`,
+		...(useMultithreadCore ? { workerURL: `${baseURL}/ffmpeg-core.worker.js` } : {})
+	};
+}
 import type { Track, Clip } from '$lib/editor/timeline';
 import {
 	FRAME_RATE,
@@ -16,7 +23,7 @@ import {
 } from '$lib/editor/timeline';
 import type { MediaAsset } from '$lib/editor/sidebar';
 import { applyChromaKey, isChromaKeyActive } from '$lib/chroma';
-import { applyColorGrade, isNeutralGrade, type ColorGrade } from '$lib/grading';
+import { applyColorGrade, isNeutralGrade, type ColorGrade, type LUTPreset } from '$lib/grading';
 import {
 	getClipPairTransitionProgress,
 	getClipTransitionVisualState,
@@ -139,13 +146,11 @@ async function getFFmpeg(): Promise<FFmpeg> {
 	if (ffmpegLoading) return ffmpegLoading;
 
 	ffmpegLoading = (async () => {
+		const { FFmpeg } = await import('@ffmpeg/ffmpeg');
 		const ffmpeg = new FFmpeg();
 
 		try {
-			await ffmpeg.load({
-				coreURL: ffmpegCoreURL,
-				wasmURL: ffmpegCoreWasmURL
-			});
+			await ffmpeg.load(getFfmpegLoadConfig());
 		} catch (error) {
 			ffmpegLoading = null;
 			throw error;
@@ -200,6 +205,7 @@ async function transcodeToMp4(
 	const progressListener = createFfmpegProgressListener(onProgress, durationSec ?? 0);
 	ffmpeg.on('log', progressListener.handler);
 
+	const { fetchFile } = await import('@ffmpeg/util');
 	await ffmpeg.writeFile('input.webm', await fetchFile(webmBlob));
 
 	const args: string[] = ['-i', 'input.webm'];
@@ -252,6 +258,7 @@ async function addAudioWithFfmpeg(
 	durationSec?: number
 ): Promise<Blob> {
 	const ffmpeg = await getFFmpeg();
+	const { fetchFile } = await import('@ffmpeg/util');
 	const progressListener = createFfmpegProgressListener(onProgress, durationSec ?? 0);
 	ffmpeg.on('log', progressListener.handler);
 
@@ -510,7 +517,11 @@ async function encodeVideoChunks(
 	};
 }
 
-function muxToMp4(video: EncodedVideoResult, audio: EncodedAudioResult | null): Blob {
+async function muxToMp4(
+	video: EncodedVideoResult,
+	audio: EncodedAudioResult | null
+): Promise<Blob> {
+	const { Muxer, ArrayBufferTarget } = await import('mp4-muxer');
 	const muxer = new Muxer({
 		target: new ArrayBufferTarget(),
 		video: { codec: 'avc', width: video.width, height: video.height },
@@ -564,7 +575,7 @@ function createMediaElement(asset: MediaAsset): HTMLVideoElement | HTMLImageElem
 	return null;
 }
 
-function collectVisualClips(tracks: Track[], mediaAssets: MediaAsset[]): LoadedClip[] {
+function collectVisualClips(tracks: Track[], mediaAssets: MediaAsset[], offset = 0): LoadedClip[] {
 	const clips: LoadedClip[] = [];
 
 	for (const track of tracks) {
@@ -572,6 +583,12 @@ function collectVisualClips(tracks: Track[], mediaAssets: MediaAsset[]): LoadedC
 		if (track.type === 'video' && track.muted) continue;
 		if (track.type === 'adjustment' && track.muted) continue;
 		for (const clip of track.clips) {
+			if (clip.sequence) {
+				clips.push(
+					...collectVisualClips(clip.sequence.tracks, mediaAssets, offset + clip.startTime)
+				);
+				continue;
+			}
 			const asset = getAssetById(mediaAssets, clip.assetId);
 			const element = asset ? createMediaElement(asset) : null;
 
@@ -579,7 +596,7 @@ function collectVisualClips(tracks: Track[], mediaAssets: MediaAsset[]): LoadedC
 				clip,
 				clipId: clip.id,
 				isAdjustment: track.type === 'adjustment',
-				startTime: clip.startTime,
+				startTime: offset + clip.startTime,
 				duration: clip.duration,
 				sourceStart: clip.sourceStart ?? 0,
 				textStyle: clip.textStyle ? { ...clip.textStyle } : undefined,
@@ -830,6 +847,23 @@ function getGradedCanvas(
 	return canvas;
 }
 
+function getTextAnimationTransform(
+	clip: Clip,
+	localTime: number
+): { x: number; y: number; scale: number; opacity: number } {
+	const edge = Math.min(0.35, clip.duration / 4);
+	const intro = edge > 0 ? Math.min(1, localTime / edge) : 1;
+	const outro = edge > 0 ? Math.min(1, (clip.duration - localTime) / edge) : 1;
+	const progress = Math.max(0, Math.min(intro, outro));
+	if (clip.textAnimation === 'lower-third-slide') {
+		return { x: (progress - 1) * 18, y: 18, scale: 1, opacity: progress };
+	}
+	if (clip.textAnimation === 'lower-third-pop') {
+		return { x: 0, y: 18, scale: 0.92 + progress * 0.08, opacity: progress };
+	}
+	return { x: 0, y: 0, scale: 1, opacity: 1 };
+}
+
 function drawClipOnCanvas(
 	ctx: CanvasRenderingContext2D,
 	clip: LoadedClip,
@@ -845,6 +879,7 @@ function drawClipOnCanvas(
 	ctx.save();
 
 	const { transform, opacity, colorAdjust } = getClipVisualState(clip.clip, localTime);
+	const textAnimation = getTextAnimationTransform(clip.clip, localTime);
 	// merge preset effects (shake, glitch, filters, transitions) with the clip's color
 	// adjustment and opacity, matching the preview's getEffectVisualState composition
 	const effectState = getEffectVisualState(
@@ -857,15 +892,19 @@ function drawClipOnCanvas(
 	const renderFilter = effectState.filter !== 'none' ? effectState.filter : '';
 
 	const transitionOpacity = transition?.state.opacity ?? 1;
-	if (effectState.opacity * transitionOpacity < 1)
-		ctx.globalAlpha = effectState.opacity * transitionOpacity;
+	if (effectState.opacity * transitionOpacity * textAnimation.opacity < 1) {
+		ctx.globalAlpha = effectState.opacity * transitionOpacity * textAnimation.opacity;
+	}
 
 	if (transform) {
 		const centerX = (transform.x / 100) * canvasWidth;
 		const centerY = (transform.y / 100) * canvasHeight;
-		ctx.translate(centerX, centerY);
+		ctx.translate(
+			centerX + (textAnimation.x / 100) * canvasWidth,
+			centerY + (textAnimation.y / 100) * canvasHeight
+		);
 		ctx.rotate((transform.rotation * Math.PI) / 180);
-		ctx.scale(transform.scale, transform.scale);
+		ctx.scale(transform.scale * textAnimation.scale, transform.scale * textAnimation.scale);
 		ctx.translate(-canvasWidth / 2, -canvasHeight / 2);
 	}
 
@@ -991,7 +1030,26 @@ function getRenderTransitions(
 export type ComposedFrameOptions = {
 	/** render the raw composition without any color grading (for before/after views) */
 	skipGrade?: boolean;
+	/** apply a preview LUT to the composed frame without changing project state */
+	lutOverride?: LUTPreset;
 };
+
+function applyLutOverride(canvas: HTMLCanvasElement, lut: LUTPreset) {
+	const context = canvas.getContext('2d', { willReadFrequently: true });
+	if (!context) return;
+	const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+	for (let offset = 0; offset < imageData.data.length; offset += 4) {
+		const [red, green, blue] = lut.apply(
+			imageData.data[offset] / 255,
+			imageData.data[offset + 1] / 255,
+			imageData.data[offset + 2] / 255
+		);
+		imageData.data[offset] = Math.round(red * 255);
+		imageData.data[offset + 1] = Math.round(green * 255);
+		imageData.data[offset + 2] = Math.round(blue * 255);
+	}
+	context.putImageData(imageData, 0, 0);
+}
 
 // an adjustment layer re-filters the already-composited frame below it: the
 // current canvas state is snapshotted, graded (exact per-pixel), then redrawn
@@ -1385,7 +1443,7 @@ async function exportWithWebCodecs(
 			totalFrames: 100,
 			message: 'Muxing final file...'
 		});
-		const blob = muxToMp4(videoResult, audioResult);
+		const blob = await muxToMp4(videoResult, audioResult);
 		return blob;
 	}
 
@@ -1395,7 +1453,7 @@ async function exportWithWebCodecs(
 		totalFrames: 100,
 		message: 'Muxing video...'
 	});
-	const videoOnlyBlob = muxToMp4(videoResult, null);
+	const videoOnlyBlob = await muxToMp4(videoResult, null);
 
 	// the mix is already resolved by the Promise.all above; await again for the value
 	const mixedBuffer = await mixedBufferPromise;
@@ -1463,6 +1521,7 @@ export function createFrameRenderer(
 			await seekClipsToTime(clips, time);
 			if (disposed) return;
 			renderFrame(canvas, clips, time, options);
+			if (options?.lutOverride) applyLutOverride(canvas, options.lutOverride);
 		},
 		dispose() {
 			disposed = true;

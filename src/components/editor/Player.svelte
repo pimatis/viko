@@ -176,8 +176,25 @@
 		}
 	}
 
-	function getTransformStyle(transform: VisualTransform) {
-		return `translate3d(${transform.x - 50}%, ${transform.y - 50}%, 0) rotate(${transform.rotation}deg) scale(${transform.scale})`;
+	function getTextAnimationStyle(layer: PlayerLayer) {
+		const edge = Math.min(0.35, layer.clip.duration / 4);
+		const intro = edge > 0 ? Math.min(1, layer.clipTime / edge) : 1;
+		const outro = edge > 0 ? Math.min(1, (layer.clip.duration - layer.clipTime) / edge) : 1;
+		const progress = Math.max(0, Math.min(intro, outro));
+		if (layer.clip.textAnimation === 'lower-third-slide') {
+			return `translate3d(${(progress - 1) * 18}%, 18%, 0)`;
+		}
+		if (layer.clip.textAnimation === 'lower-third-pop') {
+			return `translate3d(0, 18%, 0) scale(${0.92 + progress * 0.08})`;
+		}
+		return 'none';
+	}
+
+	function getTransformStyle(transform: VisualTransform, layer?: PlayerLayer) {
+		return combineTransforms(
+			`translate3d(${transform.x - 50}%, ${transform.y - 50}%, 0) rotate(${transform.rotation}deg) scale(${transform.scale})`,
+			layer ? getTextAnimationStyle(layer) : 'none'
+		);
 	}
 
 	function combineTransforms(...transforms: string[]): string {
@@ -630,7 +647,11 @@
 	onblur={() => finishVisualDrag()}
 />
 
-<section bind:this={playerRoot} data-guide-target="player" class="isolate flex h-full min-h-0 min-w-0 flex-1 flex-col bg-card">
+<section
+	bind:this={playerRoot}
+	data-guide-target="player"
+	class="isolate flex h-full min-h-0 min-w-0 flex-1 flex-col bg-card"
+>
 	<!-- top control bar -->
 	<div
 		class="relative z-20 flex h-10 shrink-0 items-center justify-end gap-1.5 border-b border-border bg-card px-2.5"
@@ -948,7 +969,7 @@
 									selectedClipId === layer.clip.id &&
 										'outline outline-1 -outline-offset-1 outline-primary'
 								)}
-								style:transform={getTransformStyle(visualTransform)}
+								style:transform={getTransformStyle(visualTransform, layer)}
 							>
 								<div class="size-full" style:clip-path={maskStyle}>
 									<div

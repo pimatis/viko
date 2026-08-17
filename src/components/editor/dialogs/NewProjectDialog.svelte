@@ -16,7 +16,8 @@
 		</Dialog.Header>
 		<Dialog.Footer>
 			<Button variant="ghost" onclick={() => (editor.newProjectDialogOpen = false)}>Cancel</Button>
-			<Button variant="destructive" onclick={() => editor.createNewProject()}>Create project</Button>
+			<Button variant="destructive" onclick={() => editor.createNewProject()}>Create project</Button
+			>
 		</Dialog.Footer>
 	</Dialog.Content>
 </Dialog.Root>

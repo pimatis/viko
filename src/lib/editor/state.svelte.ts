@@ -23,7 +23,7 @@ import {
 	type MediaFolder
 } from '$lib/editor/sidebar';
 import { normalizeClipAudio } from '$lib/audio/normalize';
-import { TEXT_PRESETS, type TextStyle } from '$lib/editor/text';
+import { TEXT_PRESETS, type TextAnimation, type TextStyle } from '$lib/editor/text';
 import {
 	buildCaptionClips,
 	CAPTION_PRESETS,
@@ -60,11 +60,10 @@ import {
 	type Marker,
 	type KeyframeProperty
 } from '$lib/editor/timeline';
-import { cloneColorGrade, DEFAULT_COLOR_GRADE } from '$lib/grading';
+import { cloneColorGrade, DEFAULT_COLOR_GRADE, getLutPreset } from '$lib/grading';
 import { computeBandStats } from '$lib/grading/scopes';
 import { computeGradeMatch } from '$lib/grading/match';
 import {
-	exportVideo,
 	exportFrame,
 	createFrameRenderer,
 	EXPORT_QUALITIES,
@@ -129,6 +128,14 @@ import {
 
 const THUMBNAIL_WIDTH = 320;
 
+type ExportJob = {
+	document: ProjectDocument;
+	quality: ExportQuality;
+	resolution: { width: number; height: number };
+	startTime: number;
+	endTime: number;
+};
+
 export class EditorState {
 	// ---- state ----
 	projectName = $state('Untitled Project');
@@ -170,6 +177,9 @@ export class EditorState {
 	isCapturingFrame = $state(false);
 	matchingClipId = $state<string | null>(null);
 	exportProgress = $state<ExportProgress | null>(null);
+	exportQueue = $state<ExportJob[]>([]);
+	pendingRestoreProject = $state<ProjectDocument | null>(null);
+	isRestoringProject = $state(false);
 	autoSaveBlocked = $state(false);
 	isRestoringVersion = $state(false);
 	versionSearchQuery = $state('');
@@ -197,13 +207,10 @@ export class EditorState {
 	frameRate = $state(DEFAULT_FRAME_RATE);
 	projectSettingsOpen = $state(false);
 	normalizing = $state(false);
+	autoLeveling = $state(false);
 
 	// ---- static config ----
-	editorResources: EditorResource[] = [
-		...TEXT_PRESETS,
-		...STICKER_PRESETS,
-		...EFFECT_PRESETS
-	];
+	editorResources: EditorResource[] = [...TEXT_PRESETS, ...STICKER_PRESETS, ...EFFECT_PRESETS];
 
 	private thumbnailPendingIds = new Set<string>();
 
@@ -263,7 +270,7 @@ export class EditorState {
 			group: 'File',
 			hint: formatShortcut({ key: 'e', ctrlOrMeta: true }),
 			icon: Download,
-			disabled: () => !this.isSaved || this.isExporting,
+			disabled: () => !this.isSaved,
 			run: () => void this.handleExportVideo()
 		},
 		{
@@ -532,32 +539,31 @@ export class EditorState {
 	);
 	playerClipTime = $derived(
 		this.selectedClip
-			? Math.min(this.selectedClip.duration, Math.max(0, this.currentTime - this.selectedClip.startTime))
+			? Math.min(
+					this.selectedClip.duration,
+					Math.max(0, this.currentTime - this.selectedClip.startTime)
+				)
 			: 0
 	);
 	selectedClipIsAudio = $derived.by(() => {
 		const clip = this.selectedClip;
 		return Boolean(
 			clip &&
-				clip.assetId &&
-				this.mediaAssets.some(
-					(asset) => asset.id === clip.assetId && asset.kind === 'audio'
-				)
+			clip.assetId &&
+			this.mediaAssets.some((asset) => asset.id === clip.assetId && asset.kind === 'audio')
 		);
 	});
 	selectedClipHasAudio = $derived(
 		Boolean(
 			this.selectedClip?.assetId &&
-				this.mediaAssets.some(
-					(asset) =>
-						asset.id === this.selectedClip?.assetId &&
-						(asset.kind === 'audio' || asset.kind === 'video')
-				)
+			this.mediaAssets.some(
+				(asset) =>
+					asset.id === this.selectedClip?.assetId &&
+					(asset.kind === 'audio' || asset.kind === 'video')
+			)
 		)
 	);
-	sourceAsset = $derived(
-		this.mediaAssets.find((asset) => asset.id === this.sourceAssetId) ?? null
-	);
+	sourceAsset = $derived(this.mediaAssets.find((asset) => asset.id === this.sourceAssetId) ?? null);
 	timelineContentEnd = $derived(
 		Math.max(
 			0,
@@ -629,7 +635,8 @@ export class EditorState {
 		sticker?: string,
 		sourceDuration?: number,
 		createTrack = false,
-		trackName?: string
+		trackName?: string,
+		textAnimation?: TextAnimation
 	) {
 		const duration = Number.isFinite(clipDuration)
 			? Math.max(clipDuration, 1 / FRAME_RATE)
@@ -644,6 +651,7 @@ export class EditorState {
 			sourceInstanceId: clipId,
 			sourceDuration,
 			textStyle,
+			textAnimation,
 			sticker,
 			stickerColor: sticker ? '#ffffff' : undefined
 		};
@@ -670,7 +678,8 @@ export class EditorState {
 				undefined,
 				undefined,
 				true,
-				resource.name
+				resource.name,
+				resource.textAnimation
 			);
 			return;
 		}
@@ -903,40 +912,10 @@ export class EditorState {
 			createTrack,
 			trackName: createTrack ? asset.name : undefined
 		};
-		if (asset.kind === 'video') {
-			const audioTrack = this.tracks.find((track) => track.type === 'audio' && !track.locked);
-			request.linkedClips = {
-				clips: [
-					{
-						id: this.createEntityId('clip'),
-						name: asset.name,
-						startTime: start,
-						duration,
-						assetId: asset.id,
-						sourceInstanceId: instanceId,
-						sourceStart,
-						sourceDuration:
-							sourceDuration !== undefined
-								? roundToFrame(sourceDuration)
-								: (asset.duration ?? undefined),
-						volume: 1
-					}
-				],
-				trackType: 'audio',
-				targetTrackId: audioTrack?.id,
-				createTrack: !audioTrack,
-				trackName: !audioTrack ? asset.name : undefined
-			};
-		}
 		return request;
 	}
 
-	dropMediaAsset(
-		assetId: string,
-		trackId: string,
-		startTime: number,
-		createTrack = false
-	) {
+	dropMediaAsset(assetId: string, trackId: string, startTime: number, createTrack = false) {
 		const asset = this.mediaAssets.find((candidate) => candidate.id === assetId);
 		if (!asset) return;
 		this.clipInsertRequest = this.buildAssetClipRequest(asset, startTime, trackId, createTrack);
@@ -1103,7 +1082,12 @@ export class EditorState {
 				startTime,
 				undefined,
 				'video',
-				resource.textStyle
+				resource.textStyle,
+				undefined,
+				undefined,
+				false,
+				undefined,
+				resource.textAnimation
 			);
 			return;
 		}
@@ -1198,68 +1182,149 @@ export class EditorState {
 	// ---- export/capture/match ----
 
 	async handleExportVideo() {
-		if (this.isExporting) return;
 		if (this.timelineContentEnd <= 0) {
 			this.projectNotice = 'Timeline is empty - add clips to export';
 			return;
 		}
+		await this.mediaRestorePromise;
+		const startTime = this.inOutPoints.in ?? 0;
+		const endTime = this.inOutPoints.out ?? this.timelineContentEnd;
+		if (endTime <= startTime) {
+			this.projectNotice = 'Out point must be after in point';
+			return;
+		}
+		this.exportQueue = [
+			...this.exportQueue,
+			{
+				document: createProjectSnapshot(this.createProjectDocument()),
+				quality: { ...this.exportQuality },
+				resolution: { ...this.exportResolution },
+				startTime,
+				endTime
+			}
+		];
+		if (this.isExporting) this.projectNotice = `Export queued (${this.exportQueue.length} waiting)`;
+		void this.processExportQueue();
+	}
+
+	private async processExportQueue() {
+		if (this.isExporting) return;
 		this.isExporting = true;
 		try {
-			await this.mediaRestorePromise;
-			const exportStartTime = this.inOutPoints.in ?? 0;
-			const exportEndTime = this.inOutPoints.out ?? this.timelineContentEnd;
-			if (exportEndTime <= exportStartTime) {
-				this.projectNotice = 'Out point must be after in point';
-				this.isExporting = false;
-				return;
-			}
-			const blob = await exportVideo({
-				tracks: this.tracks,
-				mediaAssets: this.mediaAssets,
-				quality: { ...this.exportQuality, ...this.exportResolution },
-				duration: this.timelineContentEnd,
-				startTime: exportStartTime,
-				endTime: exportEndTime,
-				onProgress: (progress: ExportProgress) => {
-					this.exportProgress = progress;
-					if (progress.phase === 'mixing-audio') {
-						this.projectNotice = 'Mixing audio...';
-					}
-					if (progress.phase === 'rendering') {
-						const pct =
-							progress.totalFrames > 0
-								? Math.round((progress.frame / progress.totalFrames) * 100)
-								: 0;
-						this.projectNotice = `Exporting... ${pct}%`;
-					}
-					if (progress.phase === 'encoding') {
-						this.projectNotice = progress.message || 'Converting to MP4...';
-					}
-					if (progress.phase === 'done') {
-						this.projectNotice = 'Export complete';
-					}
-					if (progress.phase === 'error') {
-						this.projectNotice = 'Export failed';
-					}
+			while (this.exportQueue.length > 0) {
+				const [job, ...remainingJobs] = this.exportQueue;
+				if (!job) break;
+				this.exportQueue = remainingJobs;
+				this.exportProgress = null;
+				try {
+					const { exportVideo } = await import('$lib/export');
+					const blob = await exportVideo({
+						tracks: job.document.tracks,
+						mediaAssets: job.document.mediaAssets,
+						quality: { ...job.quality, ...job.resolution },
+						duration: Math.max(
+							...job.document.tracks.flatMap((track) =>
+								track.clips.map((clip) => clip.startTime + clip.duration)
+							),
+							0
+						),
+						startTime: job.startTime,
+						endTime: job.endTime,
+						onProgress: (progress: ExportProgress) => {
+							this.exportProgress = progress;
+						}
+					});
+					if (!blob) throw new Error('Export produced no output');
+					const url = URL.createObjectURL(blob);
+					const link = document.createElement('a');
+					link.href = url;
+					link.download = `${job.document.name.replace(/[^a-z0-9-_]+/gi, '-').replace(/^-|-$/g, '') || 'project'}-${job.quality.label}-${job.resolution.width}x${job.resolution.height}.mp4`;
+					link.click();
+					setTimeout(() => URL.revokeObjectURL(url), 60_000);
+					this.projectNotice = `Exported as ${job.quality.label} (${job.resolution.width}x${job.resolution.height})`;
+					sound.complete();
+				} catch (error) {
+					this.projectNotice = error instanceof Error ? error.message : 'Export failed';
+					sound.error();
 				}
-			});
-			if (!blob) {
-				this.projectNotice = 'Export produced no output';
-				return;
 			}
-			const url = URL.createObjectURL(blob);
-			const link = document.createElement('a');
-			link.href = url;
-			link.download = `${this.projectName.replace(/[^a-z0-9-_]+/gi, '-').replace(/^-|-$/g, '') || 'project'}-${this.exportQuality.label}-${this.exportResolution.width}x${this.exportResolution.height}.mp4`;
-			link.click();
-			setTimeout(() => URL.revokeObjectURL(url), 60_000);
-			this.projectNotice = `Exported as ${this.exportQuality.label} (${this.exportResolution.width}x${this.exportResolution.height})`;
-			sound.complete();
-		} catch (error) {
-			this.projectNotice = error instanceof Error ? error.message : 'Export failed';
+		} finally {
+			this.exportProgress = null;
+			this.isExporting = false;
+		}
+	}
+
+	async handleLutPreview(lutId: string | null, canvas: HTMLCanvasElement) {
+		if (!lutId || !this.selectedClip?.assetId) return;
+		const lut = getLutPreset(lutId);
+		if (!lut) return;
+		try {
+			await this.mediaRestorePromise;
+			const renderer = createFrameRenderer(this.tracks, this.mediaAssets);
+			try {
+				canvas.width = 96;
+				canvas.height = 54;
+				const time = Math.min(
+					this.selectedClip.startTime + this.selectedClip.duration - 1 / FRAME_RATE,
+					Math.max(this.selectedClip.startTime, this.currentTime)
+				);
+				await renderer.render(canvas, time, { lutOverride: lut });
+			} finally {
+				renderer.dispose();
+			}
+		} catch {
+			// Thumbnail failure must not interrupt grading.
+		}
+	}
+
+	async handleAutoLevels() {
+		const target = this.selectedClip;
+		if (!target?.assetId || this.autoLeveling) return;
+		this.autoLeveling = true;
+		try {
+			await this.mediaRestorePromise;
+			const renderer = createFrameRenderer(this.tracks, this.mediaAssets);
+			try {
+				const canvas = document.createElement('canvas');
+				canvas.width = 256;
+				canvas.height = Math.max(
+					2,
+					Math.round((256 * this.playerAspectRatio.height) / this.playerAspectRatio.width)
+				);
+				const context = canvas.getContext('2d', { willReadFrequently: true });
+				if (!context) return;
+				const time = Math.min(
+					target.startTime + target.duration - 1 / FRAME_RATE,
+					Math.max(target.startTime, this.currentTime)
+				);
+				await renderer.render(canvas, time, { skipGrade: true });
+				const stats = computeBandStats(context.getImageData(0, 0, canvas.width, canvas.height));
+				const reference = {
+					shadows: { red: 0.12, green: 0.12, blue: 0.12, luma: 0.12 },
+					midtones: { red: 0.5, green: 0.5, blue: 0.5, luma: 0.5 },
+					highlights: { red: 0.88, green: 0.88, blue: 0.88, luma: 0.88 }
+				};
+				const match = computeGradeMatch(stats, reference);
+				this.handleClipPropertyChange(target.id, (clip) => ({
+					...clip,
+					colorGrade: {
+						...(clip.colorGrade ?? cloneColorGrade(DEFAULT_COLOR_GRADE)),
+						curves: {
+							...(clip.colorGrade ?? DEFAULT_COLOR_GRADE).curves,
+							master: match.masterCurve
+						}
+					}
+				}));
+				this.projectNotice = 'Auto-levels applied';
+				sound.complete();
+			} finally {
+				renderer.dispose();
+			}
+		} catch {
+			this.projectNotice = 'Auto-levels failed';
 			sound.error();
 		} finally {
-			this.isExporting = false;
+			this.autoLeveling = false;
 		}
 	}
 
@@ -1522,6 +1587,31 @@ export class EditorState {
 		this.autoSaveBlocked = false;
 	}
 
+	async restorePendingProject() {
+		const project = this.pendingRestoreProject;
+		if (!project || this.isRestoringProject) return;
+		this.isRestoringProject = true;
+		try {
+			const activeLoadSequence = this.projectLoadSequence + 1;
+			this.projectLoadSequence = activeLoadSequence;
+			const restoredMedia = await restoreMediaAssets(project.mediaAssets);
+			if (this.projectLoadSequence !== activeLoadSequence) return;
+			this.applyProjectDocument({ ...project, mediaAssets: restoredMedia });
+			void this.refreshMissingAssetMetadata(restoredMedia, this.projectLoadSequence);
+			this.autoSaveEnabled = true;
+			this.pendingRestoreProject = null;
+		} catch {
+			this.projectNotice = 'Project could not be restored';
+			sound.error();
+		} finally {
+			this.isRestoringProject = false;
+		}
+	}
+
+	dismissPendingProject() {
+		this.pendingRestoreProject = null;
+	}
+
 	async restoreVersion(version: ProjectVersion) {
 		if (this.isRestoringVersion) return;
 		this.isRestoringVersion = true;
@@ -1639,11 +1729,7 @@ export class EditorState {
 		});
 	}
 
-	handleAddKeyframes(
-		clipId: string,
-		properties: KeyframeProperty[],
-		requestedTime: number
-	) {
+	handleAddKeyframes(clipId: string, properties: KeyframeProperty[], requestedTime: number) {
 		this.handleClipPropertyChange(clipId, (clip) => {
 			const clipTime = Math.min(clip.duration, Math.max(0, requestedTime));
 			return upsertClipKeyframes(
@@ -1717,9 +1803,10 @@ export class EditorState {
 						id: version.id,
 						createdAt: document.updatedAt,
 						document,
-						thumbnail: typeof (version as Record<string, unknown>).thumbnail === 'string'
-							? ((version as Record<string, unknown>).thumbnail as string)
-							: undefined
+						thumbnail:
+							typeof (version as Record<string, unknown>).thumbnail === 'string'
+								? ((version as Record<string, unknown>).thumbnail as string)
+								: undefined
 					}
 				];
 			});
@@ -1818,16 +1905,7 @@ export class EditorState {
 			try {
 				const storedProject = await storedProjectPromise;
 				if (storedProject && this.projectLoadSequence === loadSequence) {
-					const activeLoadSequence = this.projectLoadSequence;
-					this.mediaRestorePromise = restoreMediaAssets(storedProject.mediaAssets).then(
-						(restoredMedia) => {
-							if (this.projectLoadSequence !== activeLoadSequence) return;
-							this.applyProjectDocument({ ...storedProject, mediaAssets: restoredMedia });
-							void this.refreshMissingAssetMetadata(restoredMedia, this.projectLoadSequence);
-							this.autoSaveEnabled = true;
-						}
-					);
-					await this.mediaRestorePromise;
+					this.pendingRestoreProject = storedProject;
 				}
 			} catch {
 				if (this.projectLoadSequence === loadSequence) this.autoSaveEnabled = false;

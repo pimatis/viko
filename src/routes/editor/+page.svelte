@@ -11,6 +11,7 @@
 	import GuideTour from '../../components/editor/GuideTour.svelte';
 	import CommandPalette from '../../components/editor/CommandPalette.svelte';
 	import ProjectNotice from '../../components/editor/ProjectNotice.svelte';
+	import RestoreProjectPrompt from '../../components/editor/RestoreProjectPrompt.svelte';
 	import NewProjectDialog from '../../components/editor/dialogs/NewProjectDialog.svelte';
 	import ProjectSettingsDialog from '../../components/editor/dialogs/ProjectSettingsDialog.svelte';
 	import ShortcutsDialog from '../../components/editor/dialogs/ShortcutsDialog.svelte';
@@ -155,17 +156,20 @@
 					onToggleReverse={(clipId) => editor.handleToggleClipReversed(clipId)}
 					onAddKeyframe={(clipId, prop, val, time) =>
 						editor.handleAddKeyframe(clipId, prop, val, time)}
-					onAddKeyframes={(clipId, props, time) =>
-						editor.handleAddKeyframes(clipId, props, time)}
+					onAddKeyframes={(clipId, props, time) => editor.handleAddKeyframes(clipId, props, time)}
 					onRemoveKeyframesAtTime={(clipId, time) =>
 						editor.handleRemoveKeyframesAtTime(clipId, time)}
 					matchSources={editor.matchSources}
 					onMatchColor={(refId) => void editor.handleMatchColor(refId)}
+					onAutoLevels={() => void editor.handleAutoLevels()}
+					autoLeveling={editor.autoLeveling}
+					onLutPreview={(lutId, canvas) => void editor.handleLutPreview(lutId, canvas)}
 					matching={editor.matchingClipId === editor.selectedClipId}
 					canNormalizeAudio={editor.selectedClipHasAudio}
 					normalizing={editor.normalizing}
 					onNormalizeAudio={(clipId) => void editor.handleNormalizeAudio(clipId)}
 					linked={editor.selectedClipLinked}
+					onClose={() => (editor.propertiesPanelOpen = false)}
 					onUnlink={() => editor.selectedClip && editor.handleUnlinkClip(editor.selectedClip.id)}
 				/>
 			</div>
@@ -212,8 +216,7 @@
 		onPropertiesOpen={() => (editor.propertiesPanelOpen = true)}
 		duration={editor.timelineDuration}
 		playbackEnd={editor.timelineContentEnd}
-		onAssetDrop={(assetId, trackId, time) =>
-			editor.dropMediaAsset(assetId, trackId, time)}
+		onAssetDrop={(assetId, trackId, time) => editor.dropMediaAsset(assetId, trackId, time)}
 		onResourceDrop={(resId, trackId, time) => editor.dropEditorResource(resId, trackId, time)}
 		onTracksChange={(tracks) => editor.handleTracksChange(tracks)}
 		onMarkersChange={(markers) => editor.handleMarkersChange(markers)}
@@ -221,11 +224,11 @@
 		onSetInPoint={() => editor.handleSetInPoint()}
 		onSetOutPoint={() => editor.handleSetOutPoint()}
 		onClearInOutPoints={() => editor.handleClearInOutPoints()}
-		onHistoryAvailabilityChange={(undo, redo) =>
-			editor.handleHistoryAvailabilityChange(undo, redo)}
+		onHistoryAvailabilityChange={(undo, redo) => editor.handleHistoryAvailabilityChange(undo, redo)}
 		onCreateTextAt={(trackId, time) => editor.handleCreateTextAt(trackId, time)}
 	/>
 
+	<RestoreProjectPrompt {editor} />
 	<ProjectNotice {editor} />
 	<NewProjectDialog {editor} />
 	<ProjectSettingsDialog {editor} />
