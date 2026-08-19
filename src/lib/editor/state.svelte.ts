@@ -531,6 +531,13 @@ export class EditorState {
 		this.tracks.flatMap((track) => track.clips).find((clip) => clip.id === this.selectedClipId) ??
 			null
 	);
+	captionSegments = $derived.by(() =>
+		this.tracks
+			.filter((track) => track.type === 'subtitle')
+			.flatMap((track) => track.clips.filter((clip) => clip.caption))
+			.sort((a, b) => a.startTime - b.startTime)
+			.map((clip) => ({ text: clip.name, startTime: clip.startTime, duration: clip.duration }))
+	);
 	matchSources = $derived(
 		this.tracks
 			.flatMap((track) => track.clips)
@@ -768,6 +775,50 @@ export class EditorState {
 			trackName: 'Captions'
 		};
 		this.projectNotice = `Captions added (${clips.length} segments)`;
+	}
+
+	handleCaptionSegmentsChange(segments: CaptionSegment[]) {
+		const captionTracks = this.tracks.filter((track) => track.type === 'subtitle');
+		if (captionTracks.length === 0) {
+			this.insertCaptionSegments(segments, CAPTION_PRESETS[0]);
+			return;
+		}
+		const existingCaptions = captionTracks.flatMap((track) =>
+			track.clips.filter((clip) => clip.caption)
+		);
+		const template = existingCaptions[0];
+		const nextCaptions = segments.map((segment, index) => {
+			const existing = existingCaptions[index];
+			if (existing) {
+				return {
+					...existing,
+					name: segment.text,
+					startTime: segment.startTime,
+					duration: segment.duration
+				};
+			}
+			return {
+				...buildCaptionClips([segment], CAPTION_PRESETS[0], (prefix) =>
+					this.createEntityId(prefix)
+				)[0],
+				textStyle: template?.textStyle ?? CAPTION_PRESETS[0].textStyle,
+				visualTransform: template?.visualTransform
+			};
+		});
+		const captionIds = new Set(existingCaptions.map((clip) => clip.id));
+		this.tracks = this.tracks.map((track) =>
+			track.type === 'subtitle'
+				? {
+						...track,
+						clips: [
+							...track.clips.filter((clip) => !captionIds.has(clip.id)),
+							...nextCaptions
+						].sort((a, b) => a.startTime - b.startTime)
+					}
+				: track
+		);
+		this.isSaved = false;
+		this.autoSaveBlocked = false;
 	}
 
 	handleGenerateCaptions(payload: CaptionGeneratePayload) {

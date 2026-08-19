@@ -8,6 +8,8 @@ export type CaptionSegment = {
 	duration: number;
 };
 
+export type CaptionFileFormat = 'srt' | 'vtt';
+
 export type CaptionPreset = {
 	id: string;
 	name: string;
@@ -73,6 +75,74 @@ const CAPTION_CHARS_PER_SECOND = 15;
 
 export function getCaptionPreset(presetId: string): CaptionPreset | null {
 	return CAPTION_PRESETS.find((preset) => preset.id === presetId) ?? null;
+}
+
+function parseCaptionTime(value: string): number | null {
+	const match = value.trim().match(/^(\d{1,2}:)?(\d{2}):(\d{2})[,.](\d{3})$/);
+	if (!match) return null;
+	const hours = match[1] ? Number.parseInt(match[1], 10) : 0;
+	const minutes = Number.parseInt(match[2], 10);
+	const seconds = Number.parseInt(match[3], 10);
+	const milliseconds = Number.parseInt(match[4], 10);
+	if (minutes > 59 || seconds > 59) return null;
+	return hours * 3600 + minutes * 60 + seconds + milliseconds / 1000;
+}
+
+export function parseCaptionFile(content: string): CaptionSegment[] {
+	const normalized = content
+		.replace(/^\uFEFF/, '')
+		.replace(/\r\n?/g, '\n')
+		.trim();
+	if (!normalized) return [];
+	const blocks = normalized.replace(/^WEBVTT[^\n]*(?:\n|$)/i, '').split(/\n\s*\n/);
+	const segments: CaptionSegment[] = [];
+	for (const block of blocks) {
+		const lines = block.split('\n').map((line) => line.trimEnd());
+		const timingIndex = lines.findIndex((line) => line.includes('-->'));
+		if (timingIndex < 0) continue;
+		const timing = lines[timingIndex].split('-->');
+		const startTime = parseCaptionTime(timing[0]);
+		const endTime = parseCaptionTime(timing[1]?.trim().split(/\s+/)[0] ?? '');
+		const text = lines
+			.slice(timingIndex + 1)
+			.join('\n')
+			.trim();
+		if (startTime === null || endTime === null || !text || endTime <= startTime) continue;
+		segments.push({
+			text: text.slice(0, 2000),
+			startTime: roundToFrame(Math.max(0, startTime)),
+			duration: roundToFrame(Math.min(3600, endTime - startTime))
+		});
+	}
+	return segments.sort((a, b) => a.startTime - b.startTime);
+}
+
+function formatCaptionTime(seconds: number, separator: ',' | '.'): string {
+	const totalMilliseconds = Math.max(0, Math.round(seconds * 1000));
+	const hours = Math.floor(totalMilliseconds / 3_600_000);
+	const minutes = Math.floor((totalMilliseconds % 3_600_000) / 60_000);
+	const remaining = totalMilliseconds % 60_000;
+	const wholeSeconds = Math.floor(remaining / 1000);
+	const milliseconds = remaining % 1000;
+	return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(wholeSeconds).padStart(2, '0')}${separator}${String(milliseconds).padStart(3, '0')}`;
+}
+
+export function serializeCaptionSegments(
+	segments: CaptionSegment[],
+	format: CaptionFileFormat
+): string {
+	const separator = format === 'srt' ? ',' : '.';
+	const cues = segments
+		.filter((segment) => segment.text.trim() && segment.duration > 0)
+		.sort((a, b) => a.startTime - b.startTime)
+		.map((segment, index) => {
+			const start = formatCaptionTime(segment.startTime, separator);
+			const end = formatCaptionTime(segment.startTime + segment.duration, separator);
+			return format === 'srt'
+				? `${index + 1}\n${start} --> ${end}\n${segment.text.trim()}`
+				: `${start} --> ${end}\n${segment.text.trim()}`;
+		});
+	return `${format === 'vtt' ? 'WEBVTT\n\n' : ''}${cues.join('\n\n')}\n`;
 }
 
 // split a transcript into caption lines, keeping sentence boundaries intact

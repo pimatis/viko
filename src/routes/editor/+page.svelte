@@ -7,6 +7,7 @@
 	import AudioMixer from '../../components/editor/AudioMixer.svelte';
 	import SourceMonitor from '../../components/editor/SourceMonitor.svelte';
 	import Timeline from '../../components/editor/Timeline.svelte';
+	import CaptionEditor from '../../components/editor/CaptionEditor.svelte';
 	import Toolbar from '../../components/editor/Toolbar.svelte';
 	import GuideTour from '../../components/editor/GuideTour.svelte';
 	import CommandPalette from '../../components/editor/CommandPalette.svelte';
@@ -137,6 +138,11 @@
 				bind:playbackRate={editor.playbackRate}
 				bind:loopEnabled={editor.loopEnabled}
 				onVisualUpdate={(clipId, update) => editor.requestVisualUpdate(clipId, update)}
+			/>
+			<CaptionEditor
+				segments={editor.captionSegments}
+				onChange={(segments) => editor.handleCaptionSegmentsChange(segments)}
+				onSeek={(time) => (editor.currentTime = time)}
 			/>
 		</div>
 
