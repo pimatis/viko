@@ -8,15 +8,21 @@
 		type CaptionFileFormat,
 		type CaptionSegment
 	} from '$lib/editor/captions';
-	import { Plus, Trash2, Upload } from '@lucide/svelte';
+	import { ChevronDown, ChevronUp, Plus, Trash2, Upload, X } from '@lucide/svelte';
 
 	type Props = {
+		open?: boolean;
 		segments?: CaptionSegment[];
 		onChange?: (segments: CaptionSegment[]) => void;
 		onSeek?: (time: number) => void;
 	};
 
-	let { segments = [], onChange = () => {}, onSeek = () => {} }: Props = $props();
+	let {
+		open = $bindable(true),
+		segments = [],
+		onChange = () => {},
+		onSeek = () => {}
+	}: Props = $props();
 	let fileInput = $state<HTMLInputElement | null>(null);
 	let error = $state<string | null>(null);
 
@@ -74,13 +80,23 @@
 	}
 </script>
 
-<section class="flex h-56 shrink-0 flex-col border-t border-sidebar-border bg-sidebar">
+<section
+	class="flex shrink-0 flex-col border-t border-sidebar-border bg-sidebar"
+	class:h-56={open}
+	class:h-9={!open}
+>
 	<div class="flex h-9 shrink-0 items-center gap-2 border-b border-sidebar-border px-3">
-		<span class="text-[11px] font-bold tracking-wide text-sidebar-foreground uppercase"
-			>Caption editor</span
+		<button
+			class="flex items-center gap-1.5 text-[11px] font-bold tracking-wide text-sidebar-foreground uppercase"
+			onclick={() => (open = !open)}
+			aria-expanded={open}
 		>
+			{#if open}<ChevronDown class="size-3.5" />{:else}<ChevronUp class="size-3.5" />{/if}
+			Caption editor
+		</button>
 		<span class="text-[10px] text-muted-foreground">{segments.length} cues</span>
 		<div class="ml-auto flex items-center gap-1">
+			{#if open}
 			<input
 				bind:this={fileInput}
 				type="file"
@@ -111,10 +127,18 @@
 			<Button variant="ghost" size="icon-xs" onclick={addSegment} aria-label="Add caption"
 				><Plus class="size-3.5" /></Button
 			>
+			<Button
+				variant="ghost"
+				size="icon-xs"
+				onclick={() => (open = false)}
+				aria-label="Close caption editor"><X class="size-3.5" /></Button
+			>
+			{/if}
 		</div>
 	</div>
-	{#if error}<div class="px-3 py-1 text-[10px] text-destructive">{error}</div>{/if}
-	<div class="min-h-0 flex-1 overflow-auto">
+	{#if open}
+		{#if error}<div class="px-3 py-1 text-[10px] text-destructive">{error}</div>{/if}
+		<div class="min-h-0 flex-1 overflow-auto">
 		{#if segments.length === 0}
 			<div
 				class="flex h-full items-center justify-center px-4 text-center text-[11px] text-muted-foreground"
@@ -172,5 +196,6 @@
 				{/each}
 			</div>
 		{/if}
-	</div>
+		</div>
+	{/if}
 </section>
