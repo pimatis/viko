@@ -1,5 +1,6 @@
 import { onMount, onDestroy } from 'svelte';
 import { SvelteMap, SvelteSet } from 'svelte/reactivity';
+import { saveMediaHandle, getMediaHandle } from '$lib/db';
 import { sound } from '$lib/sound';
 import { audioEngine } from '$lib/audio/engine';
 import { formatShortcut, type ShortcutBinding } from '$lib/shortcuts';
@@ -104,6 +105,35 @@ import {
 	stickerIconBySymbol,
 	effectIconByPresetId
 } from '$lib/editor/palette';
+
+// ---- File System Access API helpers (typed loosely: not every lib.dom
+// version ships the permission members) ----
+type PermissionAwareHandle = FileSystemFileHandle & {
+	queryPermission?: (descriptor?: { mode: 'read' | 'readwrite' }) => Promise<PermissionState>;
+	requestPermission?: (descriptor?: { mode: 'read' | 'readwrite' }) => Promise<PermissionState>;
+};
+
+type PickerWindow = Window & {
+	showOpenFilePicker?: (options?: { multiple?: boolean }) => Promise<FileSystemFileHandle[]>;
+};
+
+function queryReadPermission(handle: FileSystemFileHandle): Promise<PermissionState> {
+	const aware = handle as PermissionAwareHandle;
+	if (!aware.queryPermission) return Promise.resolve('granted');
+	return aware.queryPermission({ mode: 'read' }).catch(() => 'denied' as PermissionState);
+}
+
+const requestReadPermission = (handle: FileSystemFileHandle): Promise<PermissionState> | null => {
+	const aware = handle as PermissionAwareHandle;
+	if (!aware.requestPermission) return null;
+	return aware.requestPermission({ mode: 'read' }).catch(() => 'denied' as PermissionState);
+};
+
+function getOpenFilePicker(): PickerWindow['showOpenFilePicker'] {
+	const picker = (window as unknown as PickerWindow).showOpenFilePicker;
+	return typeof picker === 'function' ? picker.bind(window) : undefined;
+}
+
 import {
 	Plus,
 	Settings,
@@ -1194,6 +1224,100 @@ export class EditorState {
 		this.autoSaveBlocked = false;
 	}
 
+	// ---- media relinking ----
+
+	// restore a missing asset from its stored File System Access handle when the
+	// read permission is still granted; otherwise the Relink button handles it
+	async autoRelinkGrantedAssets(assets: MediaAsset[]): Promise<MediaAsset[]> {
+		const missing = assets.filter((asset) => asset.src === '');
+		if (missing.length === 0) return assets;
+		let next = assets;
+		for (const asset of missing) {
+			const handle = await getMediaHandle(asset.id);
+			if (!handle) continue;
+			try {
+				const permission = await queryReadPermission(handle);
+				if (permission !== 'granted') continue;
+				const file = await handle.getFile();
+				const src = URL.createObjectURL(file);
+				const inspected = await inspectMediaAsset({
+					...asset,
+					src,
+					mimeType: file.type,
+					size: file.size
+				});
+				next = next.map((candidate) => (candidate.id === asset.id ? inspected : candidate));
+			} catch {
+				// stale or revoked handle: the asset stays missing for manual relink
+			}
+		}
+		return next;
+	}
+
+	async handleRelinkAsset(assetId: string) {
+		const asset = this.mediaAssets.find((candidate) => candidate.id === assetId);
+		if (!asset) return;
+		sound.select();
+		const file = await this.pickRelinkFile(assetId);
+		if (!file) return;
+		await this.applyRelinkedFile(asset, file);
+	}
+
+	private async pickRelinkFile(assetId: string): Promise<File | null> {
+		// stored handle first: permission can be requested inside the click gesture
+		const stored = await getMediaHandle(assetId);
+		if (stored) {
+			try {
+				let permission = await queryReadPermission(stored);
+				if (permission !== 'granted' && requestReadPermission) {
+					const requested = await requestReadPermission(stored);
+					if (requested) permission = requested;
+				}
+				if (permission === 'granted') return await stored.getFile();
+			} catch {
+				// fall through to the picker
+			}
+		}
+		const picker = getOpenFilePicker();
+		if (picker) {
+			try {
+				const [handle] = await picker({ multiple: false });
+				void saveMediaHandle(assetId, handle);
+				return await handle.getFile();
+			} catch {
+				return null; // user cancelled the picker
+			}
+		}
+		// fallback for browsers without the File System Access API
+		return new Promise((resolve) => {
+			const input = document.createElement('input');
+			input.type = 'file';
+			input.onchange = () => resolve(input.files?.[0] ?? null);
+			input.oncancel = () => resolve(null);
+			input.click();
+		});
+	}
+
+	private async applyRelinkedFile(asset: MediaAsset, file: File) {
+		try {
+			const src = URL.createObjectURL(file);
+			const inspected = await inspectMediaAsset({
+				...asset,
+				src,
+				mimeType: file.type,
+				size: file.size
+			});
+			this.mediaAssets = this.mediaAssets.map((candidate) =>
+				candidate.id === asset.id ? inspected : candidate
+			);
+			this.markMixerDirty();
+			sound.complete();
+		} catch {
+			this.projectNotice = 'Media file could not be relinked';
+			sound.error();
+		}
+	}
+
 	handleMediaFoldersChange(folders: MediaFolder[]) {
 		this.mediaFolders = folders;
 		this.isSaved = false;
@@ -1681,8 +1805,10 @@ export class EditorState {
 			this.projectLoadSequence = activeLoadSequence;
 			const restoredMedia = await restoreMediaAssets(project.mediaAssets);
 			if (this.projectLoadSequence !== activeLoadSequence) return;
-			this.applyProjectDocument({ ...project, mediaAssets: restoredMedia });
-			void this.refreshMissingAssetMetadata(restoredMedia, this.projectLoadSequence);
+			const relinkedMedia = await this.autoRelinkGrantedAssets(restoredMedia);
+			if (this.projectLoadSequence !== activeLoadSequence) return;
+			this.applyProjectDocument({ ...project, mediaAssets: relinkedMedia });
+			void this.refreshMissingAssetMetadata(relinkedMedia, this.projectLoadSequence);
 			this.autoSaveEnabled = true;
 			this.pendingRestoreProject = null;
 		} catch {

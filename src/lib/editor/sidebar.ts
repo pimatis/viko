@@ -30,6 +30,8 @@ export type MediaAsset = {
 	width: number | null;
 	height: number | null;
 	playbackSupported: boolean | null;
+	// true when src points at an ffmpeg-generated proxy instead of the original file
+	isProxy?: boolean;
 	createdAt: number;
 	// id of the folder/collection this asset belongs to, or null for the root
 	folderId: string | null;

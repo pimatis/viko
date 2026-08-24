@@ -576,6 +576,7 @@ function sanitizeMediaAsset(value: unknown): MediaAsset | null {
 				: null,
 		playbackSupported:
 			typeof value.playbackSupported === 'boolean' ? value.playbackSupported : null,
+		...(value.isProxy === true ? { isProxy: true } : {}),
 		createdAt: typeof value.createdAt === 'number' ? value.createdAt : Date.now(),
 		folderId: typeof value.folderId === 'string' ? value.folderId : null
 	};

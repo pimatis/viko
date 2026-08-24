@@ -90,6 +90,7 @@
 			onCreateText={() => editor.createDefaultText()}
 			onGenerateCaptions={(payload) => editor.handleGenerateCaptions(payload)}
 			onTranscribeMedia={(presetId) => void editor.handleTranscribeMedia(presetId)}
+			onRelinkAsset={(assetId) => editor.handleRelinkAsset(assetId)}
 			transcribing={editor.isTranscribing}
 			transcribeProgress={editor.transcribeProgress}
 			transcribeFileName={editor.transcribeFileName}

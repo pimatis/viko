@@ -22,6 +22,7 @@
 		type SidebarTab
 	} from '$lib/editor/sidebar';
 	import type { CaptionGeneratePayload, CaptionPreset } from '$lib/editor/captions';
+	import { transcodeToProxy, isProxyInputTooLarge } from '$lib/media/proxy';
 	import { sound } from '$lib/sound';
 	import { cn } from '$lib/utils';
 	import {
@@ -49,6 +50,7 @@
 		Trash2,
 		Type,
 		Upload,
+		Wand2,
 		X,
 		ArrowLeftRight
 	} from '@lucide/svelte';
@@ -69,6 +71,7 @@
 		onCreateText?: () => void;
 		onGenerateCaptions?: (payload: CaptionGeneratePayload) => void;
 		onTranscribeMedia?: (presetId: string) => void;
+		onRelinkAsset?: (assetId: string) => void;
 		transcribing?: boolean;
 		transcribeProgress?: number;
 		transcribeFileName?: string | null;
@@ -90,6 +93,7 @@
 		onCreateText = () => {},
 		onGenerateCaptions = () => {},
 		onTranscribeMedia = () => {},
+		onRelinkAsset = () => {},
 		transcribing = false,
 		transcribeProgress = 0,
 		transcribeFileName = null
@@ -118,6 +122,8 @@
 	let captionError = $state<string | null>(null);
 	let ownedAssetIds: string[] = [];
 	let isDestroyed = false;
+	type ProxyState = { status: 'running' | 'error'; progress: number };
+	let proxyStates = $state<Record<string, ProxyState>>({});
 
 	const tabs: { id: SidebarTab; label: string; icon: typeof Film }[] = [
 		{ id: 'media', label: 'Media', icon: Film },
@@ -530,6 +536,50 @@
 		closeMobile();
 	}
 
+	async function createProxy(asset: MediaAsset) {
+		if (asset.kind === 'image') return;
+		if (proxyStates[asset.id]?.status === 'running') return;
+		sound.start();
+		const processingCue = sound.processing();
+		proxyStates = { ...proxyStates, [asset.id]: { status: 'running', progress: 0 } };
+		try {
+			const response = await fetch(asset.src);
+			const source = await response.blob();
+			const proxyBlob = await transcodeToProxy(source, asset.kind, (ratio) => {
+				proxyStates = {
+					...proxyStates,
+					[asset.id]: { status: 'running', progress: Math.round(ratio * 100) }
+				};
+			});
+			if (isDestroyed) return;
+			const previousSrc = asset.src;
+			const newSrc = URL.createObjectURL(proxyBlob);
+			const inspected = await inspectMediaAsset({
+				...asset,
+				src: newSrc,
+				mimeType: proxyBlob.type,
+				size: proxyBlob.size
+			});
+			if (isDestroyed) {
+				URL.revokeObjectURL(newSrc);
+				return;
+			}
+			mediaAssets = mediaAssets.map((candidate) =>
+				candidate.id === asset.id
+					? { ...inspected, isProxy: true, playbackSupported: true }
+					: candidate
+			);
+			onMediaAssetsChange(mediaAssets);
+			setTimeout(() => URL.revokeObjectURL(previousSrc), 60_000);
+			delete proxyStates[asset.id];
+			proxyStates = { ...proxyStates };
+		} catch {
+			proxyStates = { ...proxyStates, [asset.id]: { status: 'error', progress: 0 } };
+		} finally {
+			processingCue?.stop();
+		}
+	}
+
 	onDestroy(() => {
 		isDestroyed = true;
 		stopAudioPreview();
@@ -762,6 +812,53 @@
 												{/if}
 											</div>
 										</button>
+										{#if asset.src === ''}
+											<div class="w-full px-1.5 pb-1.5">
+												<span class="block text-center text-[8px] font-medium text-destructive">
+													Media file missing
+												</span>
+												<button
+													class="mt-0.5 flex w-full items-center justify-center gap-1 rounded-sm bg-secondary py-1 text-[9px] font-medium text-foreground transition-colors hover:bg-secondary/80"
+													onclick={() => onRelinkAsset(asset.id)}
+												>
+													<FolderOpen class="size-3" />
+													Relink file
+												</button>
+											</div>
+										{/if}
+										{#if asset.playbackSupported === false && asset.kind !== 'image' && asset.src !== ''}
+											<div class="w-full px-1.5 pb-1.5">
+												{#if proxyStates[asset.id]?.status === 'running'}
+													<span
+														class="block text-center text-[8px] font-medium text-muted-foreground"
+													>
+														Creating proxy… {proxyStates[asset.id].progress}%
+													</span>
+													<Progress value={proxyStates[asset.id].progress} class="mt-0.5 h-1" />
+												{:else if isProxyInputTooLarge(asset.size)}
+													<span class="block text-center text-[8px] text-muted-foreground">
+														Too large for proxy (max 512 MB)
+													</span>
+												{:else}
+													<button
+														class="flex w-full items-center justify-center gap-1 rounded-sm bg-secondary py-1 text-[9px] font-medium text-foreground transition-colors hover:bg-secondary/80"
+														onclick={() => createProxy(asset)}
+													>
+														<Wand2 class="size-3" />
+														{#if proxyStates[asset.id]?.status === 'error'}
+															Retry proxy
+														{:else}
+															Create proxy
+														{/if}
+													</button>
+													{#if proxyStates[asset.id]?.status === 'error'}
+														<span class="block text-center text-[8px] text-destructive">
+															Proxy could not be created
+														</span>
+													{/if}
+												{/if}
+											</div>
+										{/if}
 										<div class="flex w-full items-center gap-1 px-1.5 py-1.5">
 											{#if renamingAssetId === asset.id}
 												<input
@@ -1067,6 +1164,53 @@
 											>
 												<X class="size-3.5" />
 											</button>
+											{#if asset.src === ''}
+												<div class="w-full px-0 pb-1">
+													<span class="block text-center text-[8px] font-medium text-destructive">
+														Media file missing
+													</span>
+													<button
+														class="mt-0.5 flex w-full items-center justify-center gap-1 rounded-sm bg-secondary py-1 text-[9px] font-medium text-foreground transition-colors hover:bg-secondary/80"
+														onclick={() => onRelinkAsset(asset.id)}
+													>
+														<FolderOpen class="size-3" />
+														Relink file
+													</button>
+												</div>
+											{/if}
+											{#if asset.playbackSupported === false && asset.kind !== 'image' && asset.src !== ''}
+												<div class="w-full px-0 pb-1">
+													{#if proxyStates[asset.id]?.status === 'running'}
+														<span
+															class="block text-center text-[8px] font-medium text-muted-foreground"
+														>
+															Creating proxy… {proxyStates[asset.id].progress}%
+														</span>
+														<Progress value={proxyStates[asset.id].progress} class="mt-0.5 h-1" />
+													{:else if isProxyInputTooLarge(asset.size)}
+														<span class="block text-center text-[8px] text-muted-foreground">
+															Too large for proxy (max 512 MB)
+														</span>
+													{:else}
+														<button
+															class="flex w-full items-center justify-center gap-1 rounded-sm bg-secondary py-1 text-[9px] font-medium text-foreground transition-colors hover:bg-secondary/80"
+															onclick={() => createProxy(asset)}
+														>
+															<Wand2 class="size-3" />
+															{#if proxyStates[asset.id]?.status === 'error'}
+																Retry proxy
+															{:else}
+																Create proxy
+															{/if}
+														</button>
+														{#if proxyStates[asset.id]?.status === 'error'}
+															<span class="block text-center text-[8px] text-destructive">
+																Proxy could not be created
+															</span>
+														{/if}
+													{/if}
+												</div>
+											{/if}
 										</div>
 									{/snippet}
 								</ContextMenu.Trigger>
