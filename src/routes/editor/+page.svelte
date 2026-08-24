@@ -14,6 +14,7 @@
 	import ProjectNotice from '../../components/editor/ProjectNotice.svelte';
 	import RestoreProjectPrompt from '../../components/editor/RestoreProjectPrompt.svelte';
 	import NewProjectDialog from '../../components/editor/dialogs/NewProjectDialog.svelte';
+	import NestedSequenceEditor from '../../components/editor/NestedSequenceEditor.svelte';
 	import ProjectSettingsDialog from '../../components/editor/dialogs/ProjectSettingsDialog.svelte';
 	import ShortcutsDialog from '../../components/editor/dialogs/ShortcutsDialog.svelte';
 	import VersionHistoryDialog from '../../components/editor/dialogs/VersionHistoryDialog.svelte';
@@ -190,6 +191,7 @@
 			onMasterVolume={(vol) => editor.handleMixerMasterVolume(vol)}
 			onTrackVolume={(trackId, vol) => editor.handleMixerTrackVolume(trackId, vol)}
 			onTrackPan={(trackId, pan) => editor.handleMixerTrackPan(trackId, pan)}
+			onTrackEffects={(trackId, patch) => editor.handleMixerTrackEffects(trackId, patch)}
 			onToggleMute={(trackId) => editor.handleMixerToggleMute(trackId)}
 			onResetTrack={(trackId) => editor.handleMixerResetTrack(trackId)}
 			onResetMaster={() => editor.handleMixerResetMaster()}
@@ -232,6 +234,7 @@
 		onClearInOutPoints={() => editor.handleClearInOutPoints()}
 		onHistoryAvailabilityChange={(undo, redo) => editor.handleHistoryAvailabilityChange(undo, redo)}
 		onCreateTextAt={(trackId, time) => editor.handleCreateTextAt(trackId, time)}
+		onSequenceEdit={(clipId) => editor.handleSequenceEdit(clipId)}
 	/>
 
 	<RestoreProjectPrompt {editor} />
@@ -242,5 +245,11 @@
 	<VersionHistoryDialog {editor} />
 	<ExportDialog {editor} />
 	<CommandPalette {editor} />
+	<NestedSequenceEditor
+		bind:open={editor.sequenceEditorOpen}
+		clip={editor.editingSequenceClip}
+		onClose={() => editor.handleSequenceEditClose()}
+		onSave={(clip) => editor.handleSequenceEditSave(clip)}
+	/>
 	<MobileNotice />
 </div>

@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onDestroy } from 'svelte';
+	import { SvelteSet } from 'svelte/reactivity';
 	import { Button } from '$lib/components/ui/button';
 	import * as Popover from '$lib/components/ui/popover';
 	import * as Select from '$lib/components/ui/select';
@@ -42,7 +43,6 @@
 		type VisualTransform
 	} from '$lib/editor/timeline';
 	import { syncMedia, syncMediaAudio } from '$lib/editor/mediaSync';
-	import { audioEngine } from '$lib/audio/engine';
 	import { collectDuckSources, getDuckingFactorAtTime, isDuckSource } from '$lib/audio/ducking';
 	import { isChromaKeyActive } from '$lib/chroma';
 	import ChromaKeyLayer from './ChromaKeyLayer.svelte';
@@ -289,14 +289,14 @@
 	// visual clips whose audio comes from a linked audio-track clip; their own
 	// media element is muted so the pair does not double the audio
 	const linkedAudioVisualClipIds = $derived.by(() => {
-		const audioInstanceIds = new Set<string>();
+		const audioInstanceIds = new SvelteSet<string>();
 		for (const track of tracks) {
 			if (track.type !== 'audio') continue;
 			for (const clip of track.clips) {
 				if (clip.sourceInstanceId) audioInstanceIds.add(clip.sourceInstanceId);
 			}
 		}
-		const visualIds = new Set<string>();
+		const visualIds = new SvelteSet<string>();
 		for (const track of tracks) {
 			if (track.type === 'audio') continue;
 			for (const clip of track.clips) {

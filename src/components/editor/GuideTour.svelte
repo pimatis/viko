@@ -23,7 +23,6 @@
 		height: number;
 	} | null>(null);
 	let tooltipPos = $state<{ top: number; left: number }>({ top: 0, left: 0 });
-	let tooltipPlacement = $state<'bottom' | 'top' | 'right' | 'left'>('bottom');
 	let completionDialogOpen = $state(false);
 	let tooltipEl = $state<HTMLElement | null>(null);
 
@@ -77,7 +76,6 @@
 		const tooltipHeight = tooltipEl?.offsetHeight ?? 220;
 
 		if (rect.bottom + tooltipHeight + gap < vh) {
-			tooltipPlacement = 'bottom';
 			const left = clamp(
 				rect.left + rect.width / 2 - TOOLTIP_WIDTH / 2,
 				16,
@@ -85,7 +83,6 @@
 			);
 			tooltipPos = { top: rect.bottom + gap, left };
 		} else if (rect.top - tooltipHeight - gap > 0) {
-			tooltipPlacement = 'top';
 			const left = clamp(
 				rect.left + rect.width / 2 - TOOLTIP_WIDTH / 2,
 				16,
@@ -93,7 +90,6 @@
 			);
 			tooltipPos = { top: rect.top - tooltipHeight - gap, left };
 		} else if (rect.right + TOOLTIP_WIDTH + gap < vw) {
-			tooltipPlacement = 'right';
 			const top = clamp(
 				rect.top + rect.height / 2 - tooltipHeight / 2,
 				16,
@@ -101,7 +97,6 @@
 			);
 			tooltipPos = { top, left: rect.right + gap };
 		} else {
-			tooltipPlacement = 'left';
 			const top = clamp(
 				rect.top + rect.height / 2 - tooltipHeight / 2,
 				16,

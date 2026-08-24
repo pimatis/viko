@@ -1,4 +1,5 @@
 import { onMount, onDestroy } from 'svelte';
+import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 import { sound } from '$lib/sound';
 import { audioEngine } from '$lib/audio/engine';
 import { formatShortcut, type ShortcutBinding } from '$lib/shortcuts';
@@ -6,6 +7,7 @@ import { EFFECT_PRESETS, type EffectApplyRequest } from '$lib/effects';
 import {
 	clearProject,
 	createProjectSnapshot,
+	disposeRestoredMedia,
 	loadMediaBlob,
 	loadProject,
 	loadVersions,
@@ -50,6 +52,8 @@ import {
 	roundToFrame,
 	updateClipProperty,
 	upsertClipKeyframes,
+	clampTrackAudioEffects,
+	DEFAULT_TRACK_AUDIO_EFFECTS,
 	type ClipInsertRequest,
 	type ClipPropertyChangeRequest,
 	type Clip,
@@ -58,7 +62,8 @@ import {
 	type Track,
 	type TrackType,
 	type Marker,
-	type KeyframeProperty
+	type KeyframeProperty,
+	type TrackAudioEffects
 } from '$lib/editor/timeline';
 import { cloneColorGrade, DEFAULT_COLOR_GRADE, getLutPreset } from '$lib/grading';
 import { computeBandStats } from '$lib/grading/scopes';
@@ -90,7 +95,6 @@ import {
 	blobToDataUrl,
 	formatRelativeTime,
 	getFirstVisualClipTime,
-	getVersionMetadata,
 	isVersionRecord
 } from '$lib/editor/versions';
 import { parseProjectDocument, isValidAspectRatio } from '$lib/editor/project-document';
@@ -204,6 +208,8 @@ export class EditorState {
 	sourceMonitorRootEl = $state<HTMLElement | null>(null);
 	mixerOpen = $state(false);
 	mixerMasterVolume = $state(1);
+	sequenceEditorOpen = $state(false);
+	editingSequenceClipId = $state<string | null>(null);
 	frameRate = $state(DEFAULT_FRAME_RATE);
 	projectSettingsOpen = $state(false);
 	normalizing = $state(false);
@@ -212,7 +218,7 @@ export class EditorState {
 	// ---- static config ----
 	editorResources: EditorResource[] = [...TEXT_PRESETS, ...STICKER_PRESETS, ...EFFECT_PRESETS];
 
-	private thumbnailPendingIds = new Set<string>();
+	private thumbnailPendingIds = new SvelteSet<string>();
 
 	paletteCommands: PaletteCommand[] = [
 		// file
@@ -538,6 +544,13 @@ export class EditorState {
 			.sort((a, b) => a.startTime - b.startTime)
 			.map((clip) => ({ text: clip.name, startTime: clip.startTime, duration: clip.duration }))
 	);
+	editingSequenceClip = $derived(
+		this.editingSequenceClipId
+			? (this.tracks
+					.flatMap((track) => track.clips)
+					.find((clip) => clip.id === this.editingSequenceClipId) ?? null)
+			: null
+	);
 	matchSources = $derived(
 		this.tracks
 			.flatMap((track) => track.clips)
@@ -805,7 +818,7 @@ export class EditorState {
 				visualTransform: template?.visualTransform
 			};
 		});
-		const captionIds = new Set(existingCaptions.map((clip) => clip.id));
+		const captionIds = new SvelteSet(existingCaptions.map((clip) => clip.id));
 		this.tracks = this.tracks.map((track) =>
 			track.type === 'subtitle'
 				? {
@@ -1092,6 +1105,21 @@ export class EditorState {
 		this.markMixerDirty();
 	}
 
+	handleMixerTrackEffects(trackId: string, patch: Partial<TrackAudioEffects>) {
+		const track = this.tracks.find((candidate) => candidate.id === trackId);
+		if (!track) return;
+		const effects = clampTrackAudioEffects({
+			...DEFAULT_TRACK_AUDIO_EFFECTS,
+			...track.effects,
+			...patch
+		});
+		track.effects = effects;
+		audioEngine.setTrackEq(trackId, effects.eqLow, effects.eqMid, effects.eqHigh);
+		audioEngine.setTrackCompressor(trackId, effects.compressorThreshold, effects.compressorRatio);
+		audioEngine.setTrackReverb(trackId, effects.reverbAmount);
+		this.markMixerDirty();
+	}
+
 	handleMixerToggleMute(trackId: string) {
 		const track = this.tracks.find((candidate) => candidate.id === trackId);
 		if (!track) return;
@@ -1110,8 +1138,13 @@ export class EditorState {
 		track.volume = 1;
 		track.pan = 0;
 		track.muted = false;
+		track.effects = { ...DEFAULT_TRACK_AUDIO_EFFECTS };
 		audioEngine.setTrackVolume(trackId, 1);
 		audioEngine.setTrackPan(trackId, 0);
+		const fx = track.effects;
+		audioEngine.setTrackEq(trackId, fx.eqLow, fx.eqMid, fx.eqHigh);
+		audioEngine.setTrackCompressor(trackId, fx.compressorThreshold, fx.compressorRatio);
+		audioEngine.setTrackReverb(trackId, fx.reverbAmount);
 		this.markMixerDirty();
 	}
 
@@ -1560,7 +1593,7 @@ export class EditorState {
 		try {
 			const refreshed = await Promise.all(missing.map((asset) => inspectMediaAsset(asset)));
 			if (this.projectLoadSequence !== loadSequence) return;
-			const refreshedById = new Map(refreshed.map((asset) => [asset.id, asset]));
+			const refreshedById = new SvelteMap(refreshed.map((asset) => [asset.id, asset]));
 			this.mediaAssets = this.mediaAssets.map((asset) => refreshedById.get(asset.id) ?? asset);
 			this.isSaved = false;
 			this.autoSaveBlocked = false;
@@ -1641,6 +1674,7 @@ export class EditorState {
 	async restorePendingProject() {
 		const project = this.pendingRestoreProject;
 		if (!project || this.isRestoringProject) return;
+		disposeRestoredMedia();
 		this.isRestoringProject = true;
 		try {
 			const activeLoadSequence = this.projectLoadSequence + 1;
@@ -1665,6 +1699,7 @@ export class EditorState {
 
 	async restoreVersion(version: ProjectVersion) {
 		if (this.isRestoringVersion) return;
+		disposeRestoredMedia();
 		this.isRestoringVersion = true;
 		sound.notification();
 		try {
@@ -1747,7 +1782,7 @@ export class EditorState {
 		const linkedIds = getLinkedClipIds(this.tracks, clipId);
 		if (linkedIds.length === 0) return;
 		sound.select();
-		const unlinkIds = new Set([clipId, ...linkedIds]);
+		const unlinkIds = new SvelteSet([clipId, ...linkedIds]);
 		const nextTracks = this.tracks.map((track) => ({
 			...track,
 			clips: track.clips.map((clip) =>
@@ -1758,6 +1793,35 @@ export class EditorState {
 		this.isSaved = false;
 		this.autoSaveBlocked = false;
 		this.projectNotice = 'Linked clips unlinked';
+	}
+
+	handleSequenceEdit(clipId: string) {
+		const clip = this.tracks.flatMap((track) => track.clips).find((c) => c.id === clipId);
+		if (!clip?.sequence) return;
+		sound.select();
+		this.editingSequenceClipId = clipId;
+		this.sequenceEditorOpen = true;
+	}
+
+	handleSequenceEditClose() {
+		this.sequenceEditorOpen = false;
+		this.editingSequenceClipId = null;
+	}
+
+	handleSequenceEditSave(updatedClip: Clip) {
+		if (!this.editingSequenceClipId) return;
+		sound.success();
+		const nextTracks = this.tracks.map((track) => ({
+			...track,
+			clips: track.clips.map((clip) =>
+				clip.id === this.editingSequenceClipId ? updatedClip : clip
+			)
+		}));
+		this.tracks = nextTracks;
+		this.isSaved = false;
+		this.autoSaveBlocked = false;
+		this.sequenceEditorOpen = false;
+		this.editingSequenceClipId = null;
 	}
 
 	handleAddKeyframe(
@@ -2008,6 +2072,25 @@ export class EditorState {
 			for (const track of snapshot) {
 				audioEngine.setTrackVolume(track.id, track.volume ?? 1);
 				audioEngine.setTrackPan(track.id, track.pan ?? 0);
+				const fx = track.effects;
+				if (fx) {
+					audioEngine.setTrackEq(track.id, fx.eqLow, fx.eqMid, fx.eqHigh);
+					audioEngine.setTrackCompressor(track.id, fx.compressorThreshold, fx.compressorRatio);
+					audioEngine.setTrackReverb(track.id, fx.reverbAmount);
+				} else {
+					audioEngine.setTrackEq(
+						track.id,
+						DEFAULT_TRACK_AUDIO_EFFECTS.eqLow,
+						DEFAULT_TRACK_AUDIO_EFFECTS.eqMid,
+						DEFAULT_TRACK_AUDIO_EFFECTS.eqHigh
+					);
+					audioEngine.setTrackCompressor(
+						track.id,
+						DEFAULT_TRACK_AUDIO_EFFECTS.compressorThreshold,
+						DEFAULT_TRACK_AUDIO_EFFECTS.compressorRatio
+					);
+					audioEngine.setTrackReverb(track.id, DEFAULT_TRACK_AUDIO_EFFECTS.reverbAmount);
+				}
 			}
 			audioEngine.setMasterVolume(this.mixerMasterVolume);
 		});

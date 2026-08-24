@@ -1,7 +1,5 @@
 <script lang="ts">
-	import { resolve } from '$app/paths';
-	import { Button } from '$lib/components/ui/button';
-	import { ArrowRight, HelpCircle } from '@lucide/svelte';
+	import { HelpCircle } from '@lucide/svelte';
 
 	const FAQS = [
 		{

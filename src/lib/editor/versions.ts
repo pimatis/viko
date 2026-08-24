@@ -1,5 +1,5 @@
 import type { Track } from '$lib/editor/timeline';
-import type { ProjectDocument, ProjectVersion } from '$lib/db';
+import type { ProjectDocument } from '$lib/db';
 
 export function formatRelativeTime(timestamp: number): string {
 	const diff = Date.now() - timestamp;

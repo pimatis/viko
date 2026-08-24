@@ -1,12 +1,17 @@
 // Shared WebAudio mixing engine for preview playback.
 //
 // Every media element that carries audio is registered against a track bus:
-//   element -> clipGain -> trackGain -> trackPanner -> masterGain -> destination
-//   (trackPanner also taps into L/R analysers for the mixer VU meters)
-// Track volume/pan/mute are applied live while the timeline plays, so the
-// Audio Mixer panel is reflected in the preview exactly like the offline
-// export mix. The context is created lazily and resumed on the first audio
-// interaction, which keeps autoplay policies happy.
+//   element -> clipGain -> trackGain -> eqLow -> eqMid -> eqHigh -> compressor
+//           -> trackPanner -> masterGain -> destination
+//   (trackPanner also taps into L/R analysers for the mixer VU meters, and the
+//   compressor feeds a convolver-based reverb send back into masterGain)
+// Track volume/pan/mute and the EQ/compressor/reverb chain are applied live
+// while the timeline plays, so the Audio Mixer panel is reflected in the
+// preview exactly like the offline export mix. The context is created lazily
+// and resumed on the first audio interaction, which keeps autoplay policies
+// happy.
+
+import { DEFAULT_TRACK_AUDIO_EFFECTS } from '$lib/editor/timeline';
 
 export type AudioLevels = {
 	left: number;
@@ -22,7 +27,12 @@ const SMOOTHING = 0.15;
 
 type TrackBus = {
 	gain: GainNode;
+	eqLow: BiquadFilterNode;
+	eqMid: BiquadFilterNode;
+	eqHigh: BiquadFilterNode;
+	compressor: DynamicsCompressorNode;
 	panner: StereoPannerNode;
+	reverbWet: GainNode;
 	analysers: [AnalyserNode, AnalyserNode];
 	volume: number;
 	pan: number;
@@ -36,6 +46,22 @@ type ElementBus = {
 
 function clamp(value: number, min: number, max: number): number {
 	return Math.min(max, Math.max(min, value));
+}
+
+// decaying stereo noise impulse shared by the live engine reverb send and the
+// offline export mix so both paths sound the same
+export function createReverbImpulse(ctx: BaseAudioContext): AudioBuffer {
+	const duration = 1.8;
+	const decay = 2.5;
+	const length = Math.floor(duration * ctx.sampleRate);
+	const impulse = ctx.createBuffer(2, length, ctx.sampleRate);
+	for (let channel = 0; channel < 2; channel += 1) {
+		const data = impulse.getChannelData(channel);
+		for (let i = 0; i < length; i += 1) {
+			data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, decay);
+		}
+	}
+	return impulse;
 }
 
 function measureLevel(analyser: AnalyserNode): number {
@@ -93,8 +119,43 @@ class AudioEngine {
 		const ctx = this.ctx as AudioContext;
 		const gain = ctx.createGain();
 		gain.gain.value = 1;
+
+		// per-track effect chain: three-band EQ into a compressor, then the
+		// panner. The compressor also feeds a reverb send (convolver + wet gain)
+		// straight into masterGain so reverb stays post-fader.
+		const eqLow = ctx.createBiquadFilter();
+		eqLow.type = 'lowshelf';
+		eqLow.frequency.value = 200;
+		const eqMid = ctx.createBiquadFilter();
+		eqMid.type = 'peaking';
+		eqMid.frequency.value = 1200;
+		eqMid.Q.value = 0.9;
+		const eqHigh = ctx.createBiquadFilter();
+		eqHigh.type = 'highshelf';
+		eqHigh.frequency.value = 4500;
+		const compressor = ctx.createDynamicsCompressor();
+		compressor.threshold.value = DEFAULT_TRACK_AUDIO_EFFECTS.compressorThreshold;
+		compressor.knee.value = 6;
+		compressor.ratio.value = DEFAULT_TRACK_AUDIO_EFFECTS.compressorRatio;
+		compressor.attack.value = 0.003;
+		compressor.release.value = 0.25;
 		const panner = ctx.createStereoPanner();
 		panner.pan.value = 0;
+		const convolver = ctx.createConvolver();
+		convolver.buffer = createReverbImpulse(ctx);
+		const reverbWet = ctx.createGain();
+		reverbWet.gain.value = 0;
+
+		gain.connect(eqLow);
+		eqLow.connect(eqMid);
+		eqMid.connect(eqHigh);
+		eqHigh.connect(compressor);
+		compressor.connect(panner);
+		panner.connect(this.masterGain as GainNode);
+		compressor.connect(convolver);
+		convolver.connect(reverbWet);
+		reverbWet.connect(this.masterGain as GainNode);
+
 		const splitter = ctx.createChannelSplitter(2);
 		const left = ctx.createAnalyser();
 		const right = ctx.createAnalyser();
@@ -102,12 +163,21 @@ class AudioEngine {
 		right.fftSize = ANALYSER_FFT_SIZE;
 		left.smoothingTimeConstant = SMOOTHING;
 		right.smoothingTimeConstant = SMOOTHING;
-		gain.connect(panner);
-		panner.connect(this.masterGain as GainNode);
 		panner.connect(splitter);
 		splitter.connect(left, 0);
 		splitter.connect(right, 1);
-		const bus: TrackBus = { gain, panner, analysers: [left, right], volume: 1, pan: 0 };
+		const bus: TrackBus = {
+			gain,
+			eqLow,
+			eqMid,
+			eqHigh,
+			compressor,
+			panner,
+			reverbWet,
+			analysers: [left, right],
+			volume: 1,
+			pan: 0
+		};
 		this.tracks.set(trackId, bus);
 		return bus;
 	}
@@ -169,6 +239,44 @@ class AudioEngine {
 		bus.pan = safe;
 		this.resumeIfNeeded();
 		bus.panner.pan.setTargetAtTime(safe, bus.panner.context.currentTime, 0.012);
+	}
+
+	setTrackEq(trackId: string, low: number, mid: number, high: number): void {
+		const bus = this.getTrackBus(trackId);
+		const safeLow = clamp(Number.isFinite(low) ? low : 0, -12, 12);
+		const safeMid = clamp(Number.isFinite(mid) ? mid : 0, -12, 12);
+		const safeHigh = clamp(Number.isFinite(high) ? high : 0, -12, 12);
+		this.resumeIfNeeded();
+		const now = bus.eqLow.context.currentTime;
+		if (Math.abs(bus.eqLow.gain.value - safeLow) >= 0.0001)
+			bus.eqLow.gain.setTargetAtTime(safeLow, now, 0.012);
+		if (Math.abs(bus.eqMid.gain.value - safeMid) >= 0.0001)
+			bus.eqMid.gain.setTargetAtTime(safeMid, now, 0.012);
+		if (Math.abs(bus.eqHigh.gain.value - safeHigh) >= 0.0001)
+			bus.eqHigh.gain.setTargetAtTime(safeHigh, now, 0.012);
+	}
+
+	setTrackCompressor(trackId: string, threshold: number, ratio: number): void {
+		const bus = this.getTrackBus(trackId);
+		const safeThreshold = clamp(Number.isFinite(threshold) ? threshold : 0, -60, 0);
+		const safeRatio = clamp(Number.isFinite(ratio) ? ratio : 1, 1, 20);
+		this.resumeIfNeeded();
+		const now = bus.compressor.context.currentTime;
+		if (Math.abs(bus.compressor.threshold.value - safeThreshold) >= 0.0001)
+			bus.compressor.threshold.setTargetAtTime(safeThreshold, now, 0.012);
+		if (Math.abs(bus.compressor.ratio.value - safeRatio) >= 0.0001)
+			bus.compressor.ratio.setTargetAtTime(safeRatio, now, 0.012);
+	}
+
+	setTrackReverb(trackId: string, amount: number): void {
+		const bus = this.getTrackBus(trackId);
+		const safeAmount = clamp(Number.isFinite(amount) ? amount : 0, 0, 100);
+		this.resumeIfNeeded();
+		bus.reverbWet.gain.setTargetAtTime(
+			(safeAmount / 100) * 0.7,
+			bus.reverbWet.context.currentTime,
+			0.012
+		);
 	}
 
 	setMasterVolume(volume: number): void {

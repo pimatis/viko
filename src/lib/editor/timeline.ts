@@ -318,6 +318,56 @@ export type ClipInsertRequest = {
 	};
 };
 
+// per-track audio effects applied by the live engine and the offline export mix.
+// Neutral values bypass the effect nodes entirely.
+export type TrackAudioEffects = {
+	/** low shelf gain, dB -12..12 (shelf at 200 Hz) */
+	eqLow: number;
+	/** peaking gain, dB -12..12 (bell at 1.2 kHz) */
+	eqMid: number;
+	/** high shelf gain, dB -12..12 (shelf at 4.5 kHz) */
+	eqHigh: number;
+	/** compressor threshold, dB -60..0 */
+	compressorThreshold: number;
+	/** compressor ratio, 1..20 */
+	compressorRatio: number;
+	/** reverb send amount, percent 0..100 */
+	reverbAmount: number;
+};
+
+export const DEFAULT_TRACK_AUDIO_EFFECTS: TrackAudioEffects = {
+	eqLow: 0,
+	eqMid: 0,
+	eqHigh: 0,
+	compressorThreshold: 0,
+	compressorRatio: 1,
+	reverbAmount: 0
+};
+
+export function isNeutralTrackEffects(effects: TrackAudioEffects | undefined): boolean {
+	if (!effects) return true;
+	const defaults = DEFAULT_TRACK_AUDIO_EFFECTS;
+	return (
+		effects.eqLow === defaults.eqLow &&
+		effects.eqMid === defaults.eqMid &&
+		effects.eqHigh === defaults.eqHigh &&
+		effects.compressorThreshold === defaults.compressorThreshold &&
+		effects.compressorRatio === defaults.compressorRatio &&
+		effects.reverbAmount === defaults.reverbAmount
+	);
+}
+
+export function clampTrackAudioEffects(effects: TrackAudioEffects): TrackAudioEffects {
+	return {
+		eqLow: Math.min(12, Math.max(-12, effects.eqLow)),
+		eqMid: Math.min(12, Math.max(-12, effects.eqMid)),
+		eqHigh: Math.min(12, Math.max(-12, effects.eqHigh)),
+		compressorThreshold: Math.min(0, Math.max(-60, effects.compressorThreshold)),
+		compressorRatio: Math.min(20, Math.max(1, effects.compressorRatio)),
+		reverbAmount: Math.min(100, Math.max(0, effects.reverbAmount))
+	};
+}
+
 export type Track = {
 	id: string;
 	name: string;
@@ -329,6 +379,8 @@ export type Track = {
 	// mixer settings: volume 0..2 (1 = unity), pan -1..1 (0 = center)
 	volume: number;
 	pan: number;
+	// optional EQ / compressor / reverb chain from the Audio Mixer panel
+	effects?: TrackAudioEffects;
 };
 
 export const DEFAULT_FRAME_RATE = 30;
@@ -388,8 +440,13 @@ export function getClipMaskStyle(mask: ClipMask): string {
 export function cloneTracks(tracks: Track[]): Track[] {
 	return tracks.map((track) => ({
 		...track,
+		// rebuild as plain value so snapshots stay structured-cloneable
+		effects: track.effects ? { ...track.effects } : undefined,
 		clips: track.clips.map((clip) => ({
 			...clip,
+			// sequence nests full clip trees of proxies; JSON round-trip is the only
+			// reliable way to strip every nested proxy for structured clone
+			sequence: clip.sequence ? JSON.parse(JSON.stringify(clip.sequence)) : undefined,
 			textStyle: clip.textStyle ? { ...clip.textStyle } : undefined,
 			visualTransform: clip.visualTransform
 				? {

@@ -23,6 +23,7 @@
 	import { cloneColorGradeOrNull } from '$lib/grading';
 	import { createFrameRenderer, type ComposedFrameRenderer } from '$lib/export';
 	import { Pencil } from '@lucide/svelte';
+	import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 	import {
 		clampClipStart,
 		cloneTracks,
@@ -34,8 +35,6 @@
 		expandLinkedSelection,
 		getLinkedClipIds,
 		KEYFRAME_PROPERTIES,
-		moveClip,
-		moveGroupedClips,
 		moveLinkedClips,
 		nudgeClips,
 		resizeClip,
@@ -153,6 +152,7 @@
 		onPropertiesOpen?: () => void;
 		onAddKeyframes?: (clipId: string, properties: KeyframeProperty[], time: number) => void;
 		onRemoveKeyframesAtTime?: (clipId: string, time: number) => void;
+		onSequenceEdit?: (clipId: string) => void;
 		mediaAssets?: MediaAsset[];
 	};
 
@@ -415,6 +415,7 @@
 		onPropertiesOpen = () => {},
 		onAddKeyframes = () => {},
 		onRemoveKeyframesAtTime = () => {},
+		onSequenceEdit = () => {},
 		mediaAssets = []
 	}: Props = $props();
 
@@ -438,7 +439,7 @@
 	let thumbnailWorker: Worker | null = null;
 	let activeThumbnailJob: ThumbnailJob | null = null;
 	let thumbnailJobs: ThumbnailJob[] = [];
-	let thumbnailJobIds = new Set<string>();
+	let thumbnailJobIds = new SvelteSet<string>();
 	let filmstripFrames = $state<Record<string, string[]>>({});
 	let hoverPreview = $state<{ clipId: string; x: number; y: number; image: string | null } | null>(
 		null
@@ -609,7 +610,7 @@
 		timelineRenderer = createFrameRenderer(tracks, mediaAssets);
 		filmstripFrames = {};
 		thumbnailJobs = [];
-		thumbnailJobIds = new Set();
+		thumbnailJobIds = new SvelteSet();
 		queueFilmstripFrames();
 		return () => {
 			timelineRenderer?.dispose();
@@ -1715,6 +1716,11 @@
 	function handleClipDoubleClick(event: MouseEvent, clip: Clip) {
 		event.preventDefault();
 		event.stopPropagation();
+		// sequence clips open the nested editor
+		if (clip.sequence) {
+			onSequenceEdit?.(clip.id);
+			return;
+		}
 		openTextEditor(clip);
 	}
 
@@ -1879,7 +1885,7 @@
 		if (selectedIds.size === 0) return;
 		// the playhead also cuts every linked partner, so a razor on the video clip
 		// produces the matching audio pieces in the same commit
-		const clipsToSplit = new Map<string, Clip>();
+		const clipsToSplit = new SvelteMap<string, Clip>();
 		for (const clip of tracks.flatMap((track) => track.clips)) {
 			if (!selectedIds.has(clip.id)) continue;
 			if (currentTime <= clip.startTime || currentTime >= clip.startTime + clip.duration) continue;
@@ -3894,6 +3900,9 @@
 					</ContextMenu.Item>
 				{/if}
 				{#if selectedSequenceClip}
+					<ContextMenu.Item onclick={() => onSequenceEdit?.(selectedSequenceClip.id)}>
+						Edit sequence
+					</ContextMenu.Item>
 					<ContextMenu.Item onclick={unwrapSelectedSequence}>
 						<Ungroup class="size-4" />
 						Unnest sequence

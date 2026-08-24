@@ -1,4 +1,9 @@
-import { getClipVisualState, type Clip, type Track } from '$lib/editor/timeline';
+import {
+	getClipVisualState,
+	type Clip,
+	type Track,
+	type TrackAudioEffects
+} from '$lib/editor/timeline';
 import type { MediaAsset } from '$lib/editor/sidebar';
 import { getClipPairTransitionProgress } from '$lib/effects';
 import {
@@ -7,6 +12,8 @@ import {
 	isDuckSource,
 	type DuckSource
 } from '$lib/audio/ducking';
+import { createReverbImpulse } from '$lib/audio/engine';
+import { isNeutralTrackEffects } from '$lib/editor/timeline';
 
 const EXPORT_SAMPLE_RATE = 48000;
 const EXPORT_CHANNELS = 2;
@@ -25,6 +32,7 @@ export type LoadedAudioClip = {
 	// track-level mix (Audio Mixer panel) applied during the offline mixdown
 	trackVolume: number;
 	trackPan: number;
+	trackEffects?: TrackAudioEffects;
 };
 
 export function collectAudioClips(tracks: Track[], mediaAssets: MediaAsset[]): LoadedAudioClip[] {
@@ -66,7 +74,8 @@ export function collectAudioClips(tracks: Track[], mediaAssets: MediaAsset[]): L
 				assetId: clip.assetId,
 				assetSrc: asset.src,
 				trackVolume: track.volume ?? 1,
-				trackPan: track.pan ?? 0
+				trackPan: track.pan ?? 0,
+				trackEffects: track.effects
 			});
 		}
 	}
@@ -167,6 +176,56 @@ function reverseAudioBuffer(buffer: AudioBuffer): AudioBuffer {
 	return reversed;
 }
 
+// mirrors the live engine's per-track chain (EQ -> compressor -> reverb send)
+// inside the offline context so exported audio matches the preview
+type OfflineFxChain = { input: BiquadFilterNode; output: AudioNode };
+
+function buildTrackFxChain(
+	ctx: BaseAudioContext,
+	effects: TrackAudioEffects | undefined,
+	impulses: Map<BaseAudioContext, AudioBuffer>
+): OfflineFxChain | null {
+	if (isNeutralTrackEffects(effects) || !effects) return null;
+	let impulse = impulses.get(ctx);
+	if (!impulse) {
+		impulse = createReverbImpulse(ctx);
+		impulses.set(ctx, impulse);
+	}
+
+	const low = ctx.createBiquadFilter();
+	low.type = 'lowshelf';
+	low.frequency.value = 200;
+	low.gain.value = effects.eqLow;
+	const mid = ctx.createBiquadFilter();
+	mid.type = 'peaking';
+	mid.frequency.value = 1200;
+	mid.Q.value = 0.9;
+	mid.gain.value = effects.eqMid;
+	const high = ctx.createBiquadFilter();
+	high.type = 'highshelf';
+	high.frequency.value = 4500;
+	high.gain.value = effects.eqHigh;
+	const compressor = ctx.createDynamicsCompressor();
+	compressor.threshold.value = effects.compressorThreshold;
+	compressor.knee.value = 6;
+	compressor.ratio.value = effects.compressorRatio;
+	compressor.attack.value = 0.003;
+	compressor.release.value = 0.25;
+
+	low.connect(mid).connect(high).connect(compressor);
+
+	const output = ctx.createGain();
+	compressor.connect(output);
+	if (effects.reverbAmount > 0) {
+		const convolver = ctx.createConvolver();
+		convolver.buffer = impulse;
+		const wet = ctx.createGain();
+		wet.gain.value = (effects.reverbAmount / 100) * 0.7;
+		compressor.connect(convolver).connect(wet).connect(output);
+	}
+	return { input: low, output };
+}
+
 export async function mixAudioOffline(
 	clips: LoadedAudioClip[],
 	decodedBuffers: Map<string, AudioBuffer>,
@@ -191,6 +250,7 @@ export async function mixAudioOffline(
 		const incomingClipId = loadedClip.clip.clipTransition?.incomingClipId;
 		if (incomingClipId) incomingTransitions.set(incomingClipId, loadedClip.clip);
 	}
+	const fxImpulses = new Map<BaseAudioContext, AudioBuffer>();
 	const getTransitionVolume = (clip: Clip, clipTime: number): number => {
 		const incoming = clip.clipTransition
 			? clipsById.get(clip.clipTransition.incomingClipId)
@@ -250,7 +310,15 @@ export async function mixAudioOffline(
 		const panner = ctx.createStereoPanner();
 		panner.pan.value = Math.min(1, Math.max(-1, loadedClip.trackPan));
 
-		source.connect(gain).connect(trackGain).connect(panner).connect(ctx.destination);
+		const fxChain = buildTrackFxChain(ctx, loadedClip.trackEffects, fxImpulses);
+		if (fxChain) {
+			trackGain.connect(fxChain.input);
+			fxChain.output.connect(panner);
+		} else {
+			trackGain.connect(panner);
+		}
+		panner.connect(ctx.destination);
+		source.connect(gain).connect(trackGain);
 		source.start(exportOffset, sourceOffset, visibleDuration * loadedClip.speed);
 	}
 

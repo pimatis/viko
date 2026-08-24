@@ -3,6 +3,7 @@ import {
 	clampKeyframeValue,
 	DEFAULT_BEZIER_POINTS,
 	DEFAULT_FRAME_RATE,
+	DEFAULT_TRACK_AUDIO_EFFECTS,
 	FRAME_RATE,
 	FRAME_RATE_OPTIONS,
 	isBlendMode,
@@ -12,7 +13,8 @@ import {
 	sanitizeClipMask,
 	type Clip,
 	type KeyframeProperty,
-	type Track
+	type Track,
+	type TrackAudioEffects
 } from '$lib/editor/timeline';
 import {
 	clampCurvePoints,
@@ -23,8 +25,6 @@ import {
 	clampWheelHue,
 	clampWheelSaturation,
 	clampWheelStrength,
-	cloneColorGrade,
-	DEFAULT_COLOR_GRADE,
 	DEFAULT_SECONDARY_CORRECTION,
 	IDENTITY_CURVE,
 	isLutPresetId,
@@ -48,12 +48,9 @@ import { clampDuckAmountDb } from '$lib/audio/ducking';
 import type { MediaAsset, MediaFolder } from '$lib/editor/sidebar';
 import { STICKER_PRESETS } from '$lib/editor/sidebar';
 import { TEXT_PRESETS, type TextAnimation, type TextStyle } from '$lib/editor/text';
-import {
-	PLAYER_ASPECT_RATIO_PRESETS,
-	PLAYER_ASPECT_RATIOS,
-	type PlayerAspectRatioMode
-} from '$lib/editor/player';
+import { PLAYER_ASPECT_RATIO_PRESETS, type PlayerAspectRatioMode } from '$lib/editor/player';
 import type { ProjectDocument } from '$lib/db';
+import { SvelteSet } from 'svelte/reactivity';
 import {
 	MAX_PROJECT_ASSETS,
 	MAX_PROJECT_FOLDERS,
@@ -520,10 +517,28 @@ function sanitizeTrack(value: unknown): Track | null {
 			pan:
 				typeof value.pan === 'number' && Number.isFinite(value.pan)
 					? Math.min(1, Math.max(-1, value.pan))
-					: 0
+					: 0,
+			effects: sanitizeTrackAudioEffects(value.effects)
 		}
 	]);
 	return reconciledTrack;
+}
+
+function sanitizeTrackAudioEffects(value: unknown): TrackAudioEffects {
+	const defaults = DEFAULT_TRACK_AUDIO_EFFECTS;
+	if (!isRecord(value)) return { ...defaults };
+	const bounded = (candidate: unknown, min: number, max: number, fallback: number): number =>
+		typeof candidate === 'number' && Number.isFinite(candidate)
+			? Math.min(max, Math.max(min, candidate))
+			: fallback;
+	return {
+		eqLow: bounded(value.eqLow, -12, 12, defaults.eqLow),
+		eqMid: bounded(value.eqMid, -12, 12, defaults.eqMid),
+		eqHigh: bounded(value.eqHigh, -12, 12, defaults.eqHigh),
+		compressorThreshold: bounded(value.compressorThreshold, -60, 0, defaults.compressorThreshold),
+		compressorRatio: bounded(value.compressorRatio, 1, 20, defaults.compressorRatio),
+		reverbAmount: bounded(value.reverbAmount, 0, 100, defaults.reverbAmount)
+	};
 }
 
 function sanitizeMediaAsset(value: unknown): MediaAsset | null {
@@ -588,7 +603,7 @@ export function parseProjectDocument(value: unknown): ProjectDocument | null {
 		const sanitized = sanitizeMediaFolder(folder);
 		return sanitized ? [sanitized] : [];
 	});
-	const folderIds = new Set(mediaFolders.map((folder) => folder.id));
+	const folderIds = new SvelteSet(mediaFolders.map((folder) => folder.id));
 	return {
 		format: PROJECT_FORMAT,
 		version: PROJECT_VERSION,

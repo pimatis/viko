@@ -97,105 +97,105 @@
 		<span class="text-[10px] text-muted-foreground">{segments.length} cues</span>
 		<div class="ml-auto flex items-center gap-1">
 			{#if open}
-			<input
-				bind:this={fileInput}
-				type="file"
-				accept=".srt,.vtt,text/vtt,application/x-subrip"
-				class="hidden"
-				onchange={handleImport}
-			/>
-			<Button
-				variant="ghost"
-				size="icon-xs"
-				onclick={() => fileInput?.click()}
-				aria-label="Import captions"><Upload class="size-3.5" /></Button
-			>
-			<Button
-				variant="ghost"
-				size="icon-xs"
-				onclick={() => exportFile('srt')}
-				disabled={segments.length === 0}
-				aria-label="Export SRT">SRT</Button
-			>
-			<Button
-				variant="ghost"
-				size="icon-xs"
-				onclick={() => exportFile('vtt')}
-				disabled={segments.length === 0}
-				aria-label="Export VTT">VTT</Button
-			>
-			<Button variant="ghost" size="icon-xs" onclick={addSegment} aria-label="Add caption"
-				><Plus class="size-3.5" /></Button
-			>
-			<Button
-				variant="ghost"
-				size="icon-xs"
-				onclick={() => (open = false)}
-				aria-label="Close caption editor"><X class="size-3.5" /></Button
-			>
+				<input
+					bind:this={fileInput}
+					type="file"
+					accept=".srt,.vtt,text/vtt,application/x-subrip"
+					class="hidden"
+					onchange={handleImport}
+				/>
+				<Button
+					variant="ghost"
+					size="icon-xs"
+					onclick={() => fileInput?.click()}
+					aria-label="Import captions"><Upload class="size-3.5" /></Button
+				>
+				<Button
+					variant="ghost"
+					size="icon-xs"
+					onclick={() => exportFile('srt')}
+					disabled={segments.length === 0}
+					aria-label="Export SRT">SRT</Button
+				>
+				<Button
+					variant="ghost"
+					size="icon-xs"
+					onclick={() => exportFile('vtt')}
+					disabled={segments.length === 0}
+					aria-label="Export VTT">VTT</Button
+				>
+				<Button variant="ghost" size="icon-xs" onclick={addSegment} aria-label="Add caption"
+					><Plus class="size-3.5" /></Button
+				>
+				<Button
+					variant="ghost"
+					size="icon-xs"
+					onclick={() => (open = false)}
+					aria-label="Close caption editor"><X class="size-3.5" /></Button
+				>
 			{/if}
 		</div>
 	</div>
 	{#if open}
 		{#if error}<div class="px-3 py-1 text-[10px] text-destructive">{error}</div>{/if}
 		<div class="min-h-0 flex-1 overflow-auto">
-		{#if segments.length === 0}
-			<div
-				class="flex h-full items-center justify-center px-4 text-center text-[11px] text-muted-foreground"
-			>
-				Generate or import captions to edit them here.
-			</div>
-		{:else}
-			<div class="min-w-[560px] divide-y divide-border/60">
+			{#if segments.length === 0}
 				<div
-					class="grid grid-cols-[2rem_minmax(12rem,1fr)_6rem_6rem_2rem] gap-2 px-3 py-1 text-[9px] font-semibold tracking-wide text-muted-foreground uppercase"
+					class="flex h-full items-center justify-center px-4 text-center text-[11px] text-muted-foreground"
 				>
-					<span>#</span><span>Text</span><span>Start (s)</span><span>Duration (s)</span><span
-					></span>
+					Generate or import captions to edit them here.
 				</div>
-				{#each segments as segment, index (index)}
+			{:else}
+				<div class="min-w-[560px] divide-y divide-border/60">
 					<div
-						class="grid grid-cols-[2rem_minmax(12rem,1fr)_6rem_6rem_2rem] items-center gap-2 px-3 py-1"
+						class="grid grid-cols-[2rem_minmax(12rem,1fr)_6rem_6rem_2rem] gap-2 px-3 py-1 text-[9px] font-semibold tracking-wide text-muted-foreground uppercase"
 					>
-						<button
-							class="text-left text-[10px] text-muted-foreground tabular-nums hover:text-foreground"
-							onclick={() => onSeek(segment.startTime)}>{index + 1}</button
-						>
-						<Textarea
-							value={segment.text}
-							rows={1}
-							class="min-h-7 resize-none bg-background py-1 text-[11px]"
-							oninput={(event) => updateSegment(index, { text: event.currentTarget.value })}
-						/>
-						<Input
-							type="number"
-							min="0"
-							step="0.033"
-							value={segment.startTime}
-							class="h-7 bg-background text-[11px] tabular-nums"
-							onchange={(event) =>
-								updateSegment(index, { startTime: Number(event.currentTarget.value) })}
-						/>
-						<Input
-							type="number"
-							min="0.033"
-							step="0.033"
-							value={segment.duration}
-							class="h-7 bg-background text-[11px] tabular-nums"
-							onchange={(event) =>
-								updateSegment(index, { duration: Number(event.currentTarget.value) })}
-						/>
-						<Button
-							variant="ghost"
-							size="icon-xs"
-							class="text-muted-foreground hover:text-destructive"
-							onclick={() => removeSegment(index)}
-							aria-label={`Delete caption ${index + 1}`}><Trash2 class="size-3.5" /></Button
-						>
+						<span>#</span><span>Text</span><span>Start (s)</span><span>Duration (s)</span><span
+						></span>
 					</div>
-				{/each}
-			</div>
-		{/if}
+					{#each segments as segment, index (index)}
+						<div
+							class="grid grid-cols-[2rem_minmax(12rem,1fr)_6rem_6rem_2rem] items-center gap-2 px-3 py-1"
+						>
+							<button
+								class="text-left text-[10px] text-muted-foreground tabular-nums hover:text-foreground"
+								onclick={() => onSeek(segment.startTime)}>{index + 1}</button
+							>
+							<Textarea
+								value={segment.text}
+								rows={1}
+								class="min-h-7 resize-none bg-background py-1 text-[11px]"
+								oninput={(event) => updateSegment(index, { text: event.currentTarget.value })}
+							/>
+							<Input
+								type="number"
+								min="0"
+								step="0.033"
+								value={segment.startTime}
+								class="h-7 bg-background text-[11px] tabular-nums"
+								onchange={(event) =>
+									updateSegment(index, { startTime: Number(event.currentTarget.value) })}
+							/>
+							<Input
+								type="number"
+								min="0.033"
+								step="0.033"
+								value={segment.duration}
+								class="h-7 bg-background text-[11px] tabular-nums"
+								onchange={(event) =>
+									updateSegment(index, { duration: Number(event.currentTarget.value) })}
+							/>
+							<Button
+								variant="ghost"
+								size="icon-xs"
+								class="text-muted-foreground hover:text-destructive"
+								onclick={() => removeSegment(index)}
+								aria-label={`Delete caption ${index + 1}`}><Trash2 class="size-3.5" /></Button
+							>
+						</div>
+					{/each}
+				</div>
+			{/if}
 		</div>
 	{/if}
 </section>

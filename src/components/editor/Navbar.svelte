@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { Button } from '$lib/components/ui/button';
+	import { resolve } from '$app/paths';
 	import { Badge } from '$lib/components/ui/badge';
 	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
 	import * as Tooltip from '$lib/components/ui/tooltip';
@@ -290,7 +291,7 @@
 	>
 		<!-- left: brand + sidebar toggle + menus -->
 		<div class="flex min-w-0 items-center gap-1.5">
-			<a href="/" class="flex shrink-0 items-center gap-2 text-foreground">
+			<a href={resolve('/')} class="flex shrink-0 items-center gap-2 text-foreground">
 				<img
 					src="/assets/logos/logo.png"
 					alt="Viko"
